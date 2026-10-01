@@ -1,0 +1,26 @@
+{
+  "maxPages": 20,
+  "maxActions": 100,
+  "maxDepth": 3,
+  "timeouts": { "navigationMs": 30000, "actionMs": 8000, "runMs": 900000 },
+  "viewports": [
+    { "name": "desktop", "width": 1440, "height": 900 },
+    { "name": "tablet", "width": 768, "height": 1024 },
+    { "name": "mobile", "width": 390, "height": 844 }
+  ],
+  "rules": { "disabled": [], "severityOverrides": {}, "custom": [], "plugins": [] },
+  "ignoredEndpoints": [],
+  "dangerousActions": {
+    "keywords": ["delete", "remove account", "purchase", "buy now", "pay", "checkout", "confirm payment", "deactivate", "close account", "unsubscribe all", "destroy", "wipe", "reset all"],
+    "allowMethods": ["GET", "HEAD", "OPTIONS"]
+  },
+  "visualThresholds": { "maxDiffRatio": 0.01, "pixelThreshold": 0.1, "maskSelectors": [] },
+  "functional": { "submitValidForms": false, "maxButtonsPerPage": 15, "maxLinksPerPage": 15, "maxFormsPerPage": 5, "allViewports": false },
+  "accessibility": { "enabled": true, "keyboard": true, "allViewports": false },
+  "network": { "slowRequestMs": 3000 },
+  "geometry": { "minTargetSize": 24, "overlapMinRatio": 0.2, "maxElements": 1500 },
+  "ai": { "maxCalls": 20, "maxFindingsPerCall": 8, "sendScreenshots": false },
+  "agent": { "maxActions": 25, "maxPages": 5, "maxDepth": 3, "maxRuntimeMs": 180000, "maxRepeatedActions": 3, "maxRepeatedStates": 3, "noProgressLimit": 5, "maxLlmCalls": 30 },
+  "paths": { "dataDir": "data", "baselineDir": "data/baselines" },
+  "server": { "host": "127.0.0.1", "port": 4000 }
+}

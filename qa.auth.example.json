@@ -1,0 +1,7 @@
+{
+  "profiles": {
+    "staging-admin": { "location": "cookie", "key": "session", "source": { "env": "QA_JWT_STAGING_ADMIN" } },
+    "staging-user": { "location": "header", "scheme": "Bearer", "source": { "file": "/run/secrets/staging_user_jwt" } },
+    "demo": { "location": "cookie", "key": "token", "source": { "env": "QA_JWT_DEMO" } }
+  }
+}

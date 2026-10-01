@@ -1,0 +1,8 @@
+node_modules
+data
+web/dist
+dist
+*.log
+.env
+.env.*
+qa.auth.json

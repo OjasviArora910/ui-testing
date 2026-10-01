@@ -1,0 +1,101 @@
+# Autonomous UI/UX QA Platform
+
+Point it at a web app URL. It crawls the site with a real browser and tests buttons, links and forms safely. It checks layout, responsiveness, accessibility, network/console errors and visual regressions. It stores evidence for every problem, and then uses AI to explain and prioritise the findings. A defect is only reported when a rule, measurement, baseline or human backs it up. Anything weaker goes to a human review queue.
+
+## Requirements
+- Node.js 22.9+ (developed on Node 24)
+- Chromium for Playwright: `npx playwright install chromium`
+
+## Install
+```bash
+cd qa-platform
+npm install
+npx playwright install chromium
+```
+
+## Quick start (demo app + dashboard)
+Use two terminals.
+
+```bash
+# terminal 1 – the intentionally broken demo app on http://127.0.0.1:3000
+npm run demo
+
+# terminal 2 – build the dashboard once, then start API + dashboard on http://127.0.0.1:4000
+npm run web:build
+npm run serve
+```
+Open http://127.0.0.1:4000, enter `http://127.0.0.1:3000`, choose a mode and viewports, then click **START TEST**.
+
+For dashboard development with hot reload, keep `npm run serve` running and use `npm run dev:web` (http://localhost:5173, proxies `/api` to :4000).
+
+## Logged-in apps (JWT)
+Tokens are **never** typed into the UI. They are configured on the server:
+
+1. Copy `qa.auth.example.json` to `qa.auth.json` (gitignored) and define profiles:
+   ```json
+   { "profiles": { "demo": { "location": "cookie", "key": "token", "source": { "env": "QA_JWT_DEMO" } } } }
+   ```
+   `location` is one of `cookie | localStorage | sessionStorage | header`. `source` is an env var (`{ "env": ... }`) or a mounted file (`{ "file": ... }`).
+2. Provide the secret through the environment before starting the server:
+   ```powershell
+   $env:QA_JWT_DEMO = "<token>"        # PowerShell
+   ```
+   ```bash
+   export QA_JWT_DEMO="<token>"        # bash
+   ```
+   `npm run demo` prints the demo app's (public, harmless) token.
+3. Pick the profile name in the dashboard's **Authentication** dropdown.
+
+## AI (your key)
+Put them in a `.env` file (copy `.env.example`; the npm scripts load it automatically), or set them in the shell:
+```powershell
+$env:QA_AI_PROVIDER = "gemini"     # or groq | openai | openai-compatible
+$env:QA_AI_API_KEY  = "<your key>"
+# optional: $env:QA_AI_MODEL = "gemini-2.5-flash"
+npm run serve
+```
+On startup the server prints which provider/model is active. The **AI-assisted** and **Exploratory** modes are enabled in the dashboard only when AI is configured.
+
+## Command line / CI
+```bash
+npm run qa -- run --url http://127.0.0.1:3000 --mode deterministic
+npm run qa -- run --url https://staging.example.com --profile staging-admin --mode ai_assisted --max-pages 30
+npm run qa -- runs                      # list runs
+npm run qa -- resume <runId>            # continue an interrupted run
+npm run qa -- baseline --run <runId> --page http://127.0.0.1:3000/legit --viewport desktop   # approve visual baseline
+```
+Exit codes: `0` PASS / PASS_WITH_WARNINGS, `1` FAILED, `2` BLOCKED_PENDING_REVIEW, `3` error.
+
+Reports are written to `data/runs/<runId>/report.html | report.json | report.xml` (JUnit). They are also available from the dashboard.
+
+## Docker
+```bash
+cp qa.auth.example.json qa.auth.json     # edit profiles
+# put QA_AI_PROVIDER / QA_AI_API_KEY / QA_JWT_* in .env
+docker compose up --build
+```
+- Dashboard and API: http://127.0.0.1:4000
+- Demo app: http://127.0.0.1:3000 (inside compose, test it as `http://demo:3000`)
+- Data is persisted in `./data`.
+
+## Tests
+```bash
+npm test                 # all suites (they launch Chromium; the e2e suite takes a few minutes)
+npx vitest run tests/rules.test.ts     # one suite
+npm run typecheck
+```
+
+## Configuration
+`qa.config.json` covers limits (`maxPages`, `maxActions`, `maxDepth`), timeouts, viewports, rules (disable, severity overrides, declarative `custom` rules, `plugins`), `ignoredEndpoints`, `dangerousActions`, `visualThresholds` (incl. `maskSelectors` for dynamic regions), and functional/accessibility/network/geometry/AI/agent settings. All of it is validated by Zod at startup.
+
+Custom rule example (no code change needed):
+```json
+"rules": { "custom": [ { "id": "app.cookie-banner", "name": "Cookie banner present", "type": "selector-exists", "selector": "#cookie-banner", "pages": ["/*"] } ] }
+```
+A plugin is a module listed in `rules.plugins` that default-exports one or more `Rule` objects (see `src/rules/types.ts`).
+
+## Workflow
+1. **Start a run.** Enter a URL, pick an auth profile (optional), a mode and viewports, then click START TEST. Progress streams live.
+2. **Read the results.** Defects come with a basis and evidence. Anomalies land in the **Review queue**.
+3. **Review anomalies.** For each one choose CONFIRM BUG, NOT A BUG, EXPECTED BEHAVIOR or NEEDS INVESTIGATION. Each decision is persisted, and the verdict and reports are regenerated.
+4. **Visual baselines.** The first run reports `NO_BASELINE_AVAILABLE`, which is not a failure. Approve a screenshot as the baseline, and later runs compare against it.

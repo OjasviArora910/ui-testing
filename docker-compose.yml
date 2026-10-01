@@ -1,0 +1,26 @@
+services:
+  qa:
+    build: .
+    ports:
+      - "127.0.0.1:4000:4000"
+    environment:
+      # AI (optional). Put real values in a .env file next to this file; never commit it.
+      QA_AI_PROVIDER: ${QA_AI_PROVIDER:-}
+      QA_AI_API_KEY: ${QA_AI_API_KEY:-}
+      QA_AI_MODEL: ${QA_AI_MODEL:-}
+      QA_AI_BASE_URL: ${QA_AI_BASE_URL:-}
+      # Auth profile secrets referenced from qa.auth.json, e.g.:
+      QA_JWT_DEMO: ${QA_JWT_DEMO:-}
+      QA_AUTH_PROFILES: /app/qa.auth.json
+    volumes:
+      - ./data:/app/data
+      - ./qa.auth.json:/app/qa.auth.json:ro
+
+  # Intentionally broken demo application (reachable from the qa container as http://demo:3000)
+  demo:
+    build: .
+    command: ["npx", "tsx", "src/cli.ts", "demo", "--port", "3000"]
+    environment:
+      DEMO_HOST: 0.0.0.0
+    ports:
+      - "127.0.0.1:3000:3000"

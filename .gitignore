@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+web/dist/
+*.tsbuildinfo
+
+# Runtime data: SQLite DB, evidence, reports, traces, baselines
+data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+trace.zip
+
+# Secrets: never commit (use .env.example / qa.auth.example.json as templates)
+.env
+.env.*
+!.env.example
+qa.auth.json
+*.pem
+*.key
+
+# Test / tooling output
+coverage/
+test-results/
+playwright-report/
+blob-report/
+.vitest/
+*.log
+npm-debug.log*
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
