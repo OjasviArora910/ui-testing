@@ -2,6 +2,9 @@ export type Severity = 'critical' | 'major' | 'minor' | 'info';
 export type ReviewState = 'defect' | 'pending' | 'confirmed' | 'dismissed' | 'investigating';
 export type Decision = 'CONFIRM_BUG' | 'NOT_A_BUG' | 'EXPECTED_BEHAVIOR' | 'NEEDS_INVESTIGATION';
 export type Mode = 'deterministic' | 'ai_assisted' | 'exploratory';
+export type JwtLocation = 'cookie' | 'localStorage' | 'sessionStorage' | 'header';
+/** One-time credentials: sent once with the start request, kept in server memory for that run only, never stored. */
+export interface DirectAuth { token: string; location: JwtLocation; key?: string; scheme?: string }
 export interface Viewport { name: string; width: number; height: number }
 
 export interface PlatformConfig {
@@ -15,7 +18,7 @@ export interface Snapshot {
 }
 
 export interface Run {
-  id: string; url: string; mode: Mode; status: string; verdict: string | null; authProfile: string | null; createdAt: string; finishedAt: string | null;
+  id: string; url: string; mode: Mode; status: string; verdict: string | null; authProfile: string | null; auth: { source: 'none' | 'token' | 'profile'; location?: string; profile?: string }; createdAt: string; finishedAt: string | null;
   error: string | null; abortReason: string | null; active: boolean; interrupted: boolean; progress: Snapshot | null;
   summary: { pages: number; defects: number; anomalies: number; pendingReview: number; actions: number; guardBlocked: number; visual: { pass: number; fail: number; noBaseline: number } } | null;
   reports: { html: boolean; json: boolean; junit: boolean };
@@ -43,9 +46,9 @@ export const api = {
   config: () => req<PlatformConfig>('/api/config'),
   runs: () => req<{ runs: Run[] }>('/api/runs').then((r) => r.runs),
   run: (id: string) => req<Run>(`/api/runs/${id}`),
-  start: (body: { url: string; authProfile?: string; mode: Mode; viewports: Viewport[]; overrides?: Record<string, number> }) => req<{ runId: string }>('/api/runs', { method: 'POST', body: JSON.stringify(body) }),
+  start: (body: { url: string; auth?: DirectAuth; authProfile?: string; mode: Mode; viewports: Viewport[]; overrides?: Record<string, number> }) => req<{ runId: string }>('/api/runs', { method: 'POST', body: JSON.stringify(body) }),
   stop: (id: string) => req<{ stopped: boolean }>(`/api/runs/${id}/stop`, { method: 'POST', body: '{}' }),
-  resume: (id: string) => req<{ runId: string }>(`/api/runs/${id}/resume`, { method: 'POST', body: '{}' }),
+  resume: (id: string, auth?: DirectAuth) => req<{ runId: string }>(`/api/runs/${id}/resume`, { method: 'POST', body: JSON.stringify(auth ? { auth } : {}) }),
   findings: (id: string) => req<{ findings: Finding[] }>(`/api/runs/${id}/findings`).then((r) => r.findings),
   queue: (id: string) => req<{ queue: Finding[] }>(`/api/runs/${id}/review-queue`).then((r) => r.queue),
   decide: (findingId: string, decision: Decision, note?: string) => req<{ verdict: string }>(`/api/findings/${findingId}/decision`, { method: 'POST', body: JSON.stringify({ decision, note: note || undefined }) }),

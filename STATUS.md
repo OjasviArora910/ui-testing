@@ -6,7 +6,7 @@
 ## Completed work
 | Phase | Status | Notes |
 |---|---|---|
-| 0 Config/auth profiles | done, tested | `loadConfig` (Zod), server-side `AuthProfileResolver`, strict `RunRequestSchema` (raw JWT rejected) |
+| 0 Config/auth | done, tested (auth change in step 15 not yet run) | `loadConfig` (Zod), one-time token with the URL (memory only, never stored; trace disabled), optional server-side `AuthProfileResolver`, strict `RunRequestSchema` |
 | 1 Browser foundation | done, tested | + request guard, nav status, structure collector, element ids/parents, cheap `settle`, `waitForIdle` |
 | 2 Discovery | done, tested | `PageModel`, same-origin crawler (limits, normalisation, dedupe, resume) |
 | 14 Demo app (moved up) | done | broken pages + `/legit` false-positive page + `/danger` + `/a11y` + `/account` (auth) + ground truth |

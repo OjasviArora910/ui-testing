@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, type Finding, type ProgressEvent, type Run, type Snapshot } from '../api';
 import { FindingCard } from './FindingCard';
+import { emptyToken, toDirectAuth, TokenFields, type TokenState } from './TokenFields';
+
+function authLabel(run: Run): string {
+  if (run.auth.source === 'token') return `login: one-time token (${run.auth.location ?? 'unknown location'})`;
+  if (run.auth.source === 'profile') return `login: profile "${run.auth.profile}"`;
+  return 'no login';
+}
 import { VerdictBadge } from './VerdictBadge';
 
 type Tab = 'review' | 'findings' | 'log';
@@ -15,6 +22,8 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
   const [tab, setTab] = useState<Tab>('review');
   const [filter, setFilter] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [resumeOpen, setResumeOpen] = useState(false);
+  const [resumeToken, setResumeToken] = useState<TokenState>(emptyToken);
   const loadedFinal = useRef(false);
 
   const reload = useCallback(async () => {
@@ -60,14 +69,29 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
         <div className="row between wrap">
           <div>
             <h1 className="run-title">{run.url}</h1>
-            <p className="muted">{run.id} · {run.mode}{run.authProfile ? ` · auth: ${run.authProfile}` : ''} · {new Date(run.createdAt).toLocaleString()}</p>
+            <p className="muted">{run.id} · {run.mode} · {authLabel(run)} · {new Date(run.createdAt).toLocaleString()}</p>
           </div>
           <div className="row gap">
             {run.verdict && !active && <VerdictBadge verdict={run.verdict} />}
             {active && <button className="danger" onClick={() => act(() => api.stop(runId))}>STOP TEST</button>}
-            {run.interrupted && !run.active && <button onClick={() => act(() => api.resume(runId))}>Resume</button>}
+            {run.interrupted && !run.active && run.auth.source !== 'token' && <button onClick={() => act(() => api.resume(runId))}>Resume</button>}
+            {run.interrupted && !run.active && run.auth.source === 'token' && !resumeOpen && <button onClick={() => { setResumeToken({ ...emptyToken(), location: (run.auth.location as TokenState['location']) ?? 'cookie' }); setResumeOpen(true); }}>Resume…</button>}
           </div>
         </div>
+
+        {resumeOpen && (
+          <form className="resume-box" autoComplete="off" onSubmit={(e) => {
+            e.preventDefault();
+            const auth = toDirectAuth(resumeToken);
+            setResumeToken((t) => ({ ...t, token: '' }));
+            if (!auth) { setError('Paste the token to resume.'); return; }
+            void act(() => api.resume(runId, auth)).then(() => setResumeOpen(false));
+          }}>
+            <p className="small">This run logged in with a one-time token, which was never stored. Paste it again to resume.</p>
+            <TokenFields value={resumeToken} onChange={setResumeToken} idPrefix="resume" />
+            <div className="row gap"><button type="submit">Resume run</button><button type="button" onClick={() => { setResumeOpen(false); setResumeToken(emptyToken()); }}>Cancel</button></div>
+          </form>
+        )}
 
         <div className="stats">
           <Stat label="Status" value={s?.status ?? run.status} />

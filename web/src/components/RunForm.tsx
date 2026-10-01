@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import { api, type Mode, type PlatformConfig } from '../api';
+import { emptyToken, toDirectAuth, TokenFields, type TokenState } from './TokenFields';
 
 const MODE_LABEL: Record<Mode, string> = {
   deterministic: 'Deterministic (rules + functional tests)',
@@ -7,9 +8,13 @@ const MODE_LABEL: Record<Mode, string> = {
   exploratory: 'Exploratory (adds AI agent exploration)',
 };
 
+type AuthChoice = 'none' | 'token' | 'profile';
+
 export function RunForm({ config, onStarted }: { config: PlatformConfig; onStarted: (runId: string) => void }) {
   const [url, setUrl] = useState('');
-  const [profile, setProfile] = useState('');
+  const [authChoice, setAuthChoice] = useState<AuthChoice>('none');
+  const [token, setToken] = useState<TokenState>(emptyToken);
+  const [profile, setProfile] = useState(config.authProfiles[0]?.name ?? '');
   const [mode, setMode] = useState<Mode>('deterministic');
   const [vps, setVps] = useState<string[]>(config.viewports.map((v) => v.name));
   const [advanced, setAdvanced] = useState(false);
@@ -18,29 +23,42 @@ export function RunForm({ config, onStarted }: { config: PlatformConfig; onStart
   const [error, setError] = useState<string | null>(null);
 
   async function submit(e: FormEvent) {
-    e.preventDefault(); setError(null); setBusy(true);
+    e.preventDefault(); setError(null);
+    const auth = authChoice === 'token' ? toDirectAuth(token) : undefined;
+    if (authChoice === 'token' && !auth) { setError('Paste the token, or choose "No login".'); return; }
+    setBusy(true);
     try {
       const overrides = Object.fromEntries(Object.entries(limits).filter(([, v]) => v !== '').map(([k, v]) => [k, Number(v)]));
       const { runId } = await api.start({
-        url, mode, authProfile: profile || undefined, viewports: config.viewports.filter((v) => vps.includes(v.name)),
+        url, mode, viewports: config.viewports.filter((v) => vps.includes(v.name)),
+        ...(auth ? { auth } : {}), ...(authChoice === 'profile' && profile ? { authProfile: profile } : {}),
         ...(Object.keys(overrides).length ? { overrides } : {}),
       });
       onStarted(runId);
-    } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
+    } catch (err) { setError((err as Error).message); } finally {
+      setToken((t) => ({ ...t, token: '' })); // never keep the secret around in the UI
+      setBusy(false);
+    }
   }
 
   return (
-    <form className="panel" onSubmit={submit}>
+    <form className="panel" onSubmit={submit} autoComplete="off">
       <h2>New test</h2>
       <label htmlFor="url">Application URL</label>
       <input id="url" type="url" required placeholder="https://staging.example.com" value={url} onChange={(e) => setUrl(e.target.value)} />
 
-      <label htmlFor="profile">Authentication</label>
-      <select id="profile" value={profile} onChange={(e) => setProfile(e.target.value)}>
-        <option value="">None (public pages)</option>
-        {config.authProfiles.map((p) => <option key={p.name} value={p.name}>{p.name} ({p.location})</option>)}
-      </select>
-      <p className="hint">Tokens are configured on the server (qa.auth.json + environment). The dashboard never sees them.</p>
+      <fieldset>
+        <legend>Login</legend>
+        <label className="check"><input type="radio" name="auth" checked={authChoice === 'none'} onChange={() => setAuthChoice('none')} /> No login (public pages)</label>
+        <label className="check"><input type="radio" name="auth" checked={authChoice === 'token'} onChange={() => setAuthChoice('token')} /> Use a JWT / access token</label>
+        {config.authProfiles.length > 0 && <label className="check"><input type="radio" name="auth" checked={authChoice === 'profile'} onChange={() => setAuthChoice('profile')} /> Server auth profile</label>}
+        {authChoice === 'token' && <TokenFields value={token} onChange={setToken} idPrefix="new" />}
+        {authChoice === 'profile' && (
+          <select aria-label="Auth profile" value={profile} onChange={(e) => setProfile(e.target.value)}>
+            {config.authProfiles.map((p) => <option key={p.name} value={p.name}>{p.name} ({p.location})</option>)}
+          </select>
+        )}
+      </fieldset>
 
       <label htmlFor="mode">Testing mode</label>
       <select id="mode" value={mode} onChange={(e) => setMode(e.target.value as Mode)}>

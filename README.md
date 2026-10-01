@@ -41,22 +41,30 @@ Open http://127.0.0.1:4000, enter `http://127.0.0.1:3000`, choose a mode and vie
 For dashboard development with hot reload, keep `npm run serve` running and use `npm run dev:web` (http://localhost:5173, proxies `/api` to :4000).
 
 ## Logged-in apps (JWT)
-Tokens are **never** typed into the UI. They are configured on the server:
+Give the token together with the URL. In the dashboard's **Login** section, choose **Use a JWT / access token**, paste the token, and pick where the app expects it:
 
-1. Copy `qa.auth.example.json` to `qa.auth.json` (gitignored) and define profiles:
-   ```json
-   { "profiles": { "demo": { "location": "cookie", "key": "token", "source": { "env": "QA_JWT_DEMO" } } } }
-   ```
-   `location` is one of `cookie | localStorage | sessionStorage | header`. `source` is an env var (`{ "env": ... }`) or a mounted file (`{ "file": ... }`).
-2. Provide the secret through the environment before starting the server:
-   ```powershell
-   $env:QA_JWT_DEMO = "<token>"        # PowerShell
-   ```
-   ```bash
-   export QA_JWT_DEMO="<token>"        # bash
-   ```
-   `npm run demo` prints the demo app's (public, harmless) token.
-3. Pick the profile name in the dashboard's **Authentication** dropdown.
+| Location | What the platform does | Optional name field |
+|---|---|---|
+| Cookie | sets a cookie on the app's domain before the first page load | cookie name (default `token`) |
+| localStorage / sessionStorage | writes the key before the app's scripts run | storage key (default `token`) |
+| Authorization header | adds the header to same-origin requests only (never to third parties) | header name (default `Authorization`), scheme (default `Bearer`) |
+
+**How the token is protected:**
+- It is used **only in server memory** for that one run. It is never written to the database, evidence, reports, logs or the run record (only "token, location=cookie" is recorded).
+- The dashboard field is masked, excluded from autofill, and cleared right after START TEST. The API never sends it back.
+- It is registered with the central redactor immediately, so if the app echoes it into the page, console or URLs, the copy is replaced with `[REDACTED]`.
+- Playwright tracing is switched off automatically for runs with credentials, because traces record cookies and headers.
+- Screenshots cannot be redacted. If an app displays the token on screen, it will appear in screenshots (stored on local disk only).
+- Because the token is not stored, **resuming** an interrupted token run asks you to paste it again.
+- Keep the server on localhost (the default) or use HTTPS when the dashboard and server are on different machines, since the token travels in the start request.
+
+**From the command line or CI**, put the token in an environment variable and name it. Never pass the token itself as an argument, because it would end up in shell history:
+```powershell
+$env:APP_TOKEN = "<token>"
+npm run qa -- run --url https://staging.example.com --token-env APP_TOKEN --token-location cookie --token-key session
+```
+
+**Optional: server-side auth profiles** (for shared or CI setups). Define named profiles in `qa.auth.json` (gitignored; see `qa.auth.example.json`) whose secret comes from an env var or mounted file. Then pick the profile in the dashboard, or pass `--profile <name>` on the CLI. `npm run demo` prints the demo app's public, harmless token for trying this out.
 
 ## AI (your key)
 Put them in a `.env` file (copy `.env.example`; the npm scripts load it automatically), or set them in the shell:
@@ -71,7 +79,8 @@ On startup the server prints which provider/model is active. The **AI-assisted**
 ## Command line / CI
 ```bash
 npm run qa -- run --url http://127.0.0.1:3000 --mode deterministic
-npm run qa -- run --url https://staging.example.com --profile staging-admin --mode ai_assisted --max-pages 30
+npm run qa -- run --url https://staging.example.com --token-env APP_TOKEN --token-location header --mode ai_assisted --max-pages 30
+npm run qa -- run --url https://staging.example.com --profile staging-admin   # server-side auth profile
 npm run qa -- runs                      # list runs
 npm run qa -- resume <runId>            # continue an interrupted run
 npm run qa -- baseline --run <runId> --page http://127.0.0.1:3000/legit --viewport desktop   # approve visual baseline
@@ -124,7 +133,7 @@ Custom rule example (no code change needed):
 A plugin is a module listed in `rules.plugins` that default-exports one or more `Rule` objects (see `src/rules/types.ts`).
 
 ## Workflow
-1. **Start a run.** Enter a URL, pick an auth profile (optional), a mode and viewports, then click START TEST. Progress streams live.
+1. **Start a run.** Enter a URL. If it needs login, paste the token and choose where it goes. Pick a mode and viewports, then click START TEST. Progress streams live.
 2. **Read the results.** Defects come with a basis and evidence. Anomalies land in the **Review queue**.
 3. **Review anomalies.** For each one choose CONFIRM BUG, NOT A BUG, EXPECTED BEHAVIOR or NEEDS INVESTIGATION. Each decision is persisted, and the verdict and reports are regenerated.
 4. **Visual baselines.** The first run reports `NO_BASELINE_AVAILABLE`, which is not a failure. Approve a screenshot as the baseline, and later runs compare against it.

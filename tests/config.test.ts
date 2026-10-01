@@ -4,7 +4,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { loadConfig, ConfigSchema } from '../src/shared/config.js';
 import { AuthProfileResolver } from '../src/shared/authProfiles.js';
-import { RunRequestSchema } from '../src/shared/runRequest.js';
+import { directAuthToConfig, RunRequestSchema, toPersisted } from '../src/shared/runRequest.js';
 
 describe('config', () => {
   it('shipped qa.config.json validates and equals the schema defaults for core limits', () => {
@@ -50,9 +50,24 @@ describe('RunRequest', () => {
     const r = RunRequestSchema.parse({ url: 'http://localhost:3000' });
     expect(r.mode).toBe('deterministic');
   });
-  it('REJECTS a raw jwt (or any unknown field) so credentials cannot come from the UI', () => {
+  it('rejects a top-level jwt (or any unknown field): tokens are only accepted inside `auth`', () => {
     expect(RunRequestSchema.safeParse({ url: 'http://x.test', jwt: 'eyJabc.def.ghi' }).success).toBe(false);
     expect(RunRequestSchema.safeParse({ url: 'http://x.test', authorization: 'Bearer x' }).success).toBe(false);
+  });
+  it('accepts a one-time token inside `auth`, and the persisted form never contains it', () => {
+    const r = RunRequestSchema.parse({ url: 'http://x.test', auth: { token: ' eyJabc.def.ghi ', location: 'header' } });
+    expect(r.auth?.token).toBe('eyJabc.def.ghi');
+    const p = toPersisted(r);
+    expect(JSON.stringify(p)).not.toContain('eyJabc');
+    expect(p).toMatchObject({ authSource: 'token', authLocation: 'header' });
+    expect(toPersisted(RunRequestSchema.parse({ url: 'http://x.test' })).authSource).toBe('none');
+    expect(directAuthToConfig(r.auth!)).toEqual({ jwt: 'eyJabc.def.ghi', location: 'header', key: undefined, scheme: 'Bearer' });
+  });
+  it('rejects token + profile together, bad locations and unknown auth fields', () => {
+    expect(RunRequestSchema.safeParse({ url: 'http://x.test', authProfile: 'a', auth: { token: 't', location: 'cookie' } }).success).toBe(false);
+    expect(RunRequestSchema.safeParse({ url: 'http://x.test', auth: { token: 't', location: 'url' } }).success).toBe(false);
+    expect(RunRequestSchema.safeParse({ url: 'http://x.test', auth: { token: 't', location: 'cookie', extra: 1 } }).success).toBe(false);
+    expect(RunRequestSchema.safeParse({ url: 'http://x.test', auth: { token: '   ', location: 'cookie' } }).success).toBe(false);
   });
   it('rejects non-http urls', () => {
     expect(RunRequestSchema.safeParse({ url: 'file:///etc/passwd' }).success).toBe(false);

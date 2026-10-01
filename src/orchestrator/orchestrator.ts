@@ -6,7 +6,8 @@ import type { Decision, FindingView, RunRecord } from '../database/types.js';
 import { reviewQueue } from '../database/review.js';
 import { generateReports } from '../reporting/index.js';
 import { ConfigSchema, deepMerge, type QAConfig } from '../shared/config.js';
-import type { RunRequest } from '../shared/runRequest.js';
+import { directAuthToConfig, toPersisted, type AuthSource, type DirectAuth, type PersistedRunRequest, type RunRequest } from '../shared/runRequest.js';
+import { AuthConfigSchema, type AuthConfig } from '../shared/types.js';
 import { RunExecutor, type ExecutorDeps } from './executor.js';
 import { emptySnapshot, type ProgressEvent, type ProgressEventType, type ProgressSnapshot } from './progress.js';
 
@@ -35,39 +36,56 @@ export class Orchestrator {
   get db(): QADatabase { return this.opts.db; }
 
   // ------------------------------------------------------------------ lifecycle
-  /** Validates the request, persists the run (no secrets), and starts executing in the background. */
+  /**
+   * Validates the request, persists the run WITHOUT any credential, and starts executing in the background.
+   * A one-time token (`request.auth`) is registered with the Redactor immediately and handed to the executor in memory only.
+   */
   start(request: RunRequest): RunRecord {
+    const auth = request.auth ? directAuthToConfig(request.auth) : undefined;
+    if (auth) { this.opts.redactor.register(auth.jwt); AuthConfigSchema.parse(auth); }
     if (this.active.size >= (this.opts.maxConcurrentRuns ?? 1)) throw new Error('Another run is already in progress');
     if (request.authProfile && !this.opts.profiles.has(request.authProfile)) throw new Error(`Unknown auth profile "${request.authProfile}"`);
     const overrides: Record<string, unknown> = { ...(request.overrides ?? {}) };
     if (request.viewports) overrides.viewports = request.viewports;
     const config = ConfigSchema.parse(deepMerge(this.opts.baseConfig, overrides));
-    const run = this.db.createRun({ url: request.url, authProfile: request.authProfile ?? null, mode: request.mode, request, config });
-    this.launch(run.id);
+    const persisted = toPersisted(request);
+    const run = this.db.createRun({ url: request.url, authProfile: request.authProfile ?? null, mode: request.mode, request: persisted, config });
+    this.launch(run.id, auth);
     return run;
   }
 
-  /** Resume a non-terminal run from its persisted cursor. */
-  resume(runId: string): RunRecord {
+  /** Resume a non-terminal run from its persisted cursor. Runs that used a one-time token need it supplied again. */
+  resume(runId: string, directAuth?: DirectAuth): RunRecord {
     const run = this.db.getRun(runId);
     if (!run) throw new Error(`Unknown run ${runId}`);
     if (this.active.has(runId)) throw new Error('Run is already executing');
     if (['COMPLETED'].includes(run.status)) throw new Error('Run already completed');
     if (this.active.size >= (this.opts.maxConcurrentRuns ?? 1)) throw new Error('Another run is already in progress');
-    this.launch(runId);
+    const persisted = run.request as PersistedRunRequest;
+    const auth = directAuth ? directAuthToConfig(directAuth) : undefined;
+    if (auth) this.opts.redactor.register(auth.jwt);
+    if (persisted.authSource === 'token' && !auth) throw new Error('This run used a one-time token, which is never stored. Provide the token again to resume it.');
+    this.launch(runId, auth);
     return run;
+  }
+
+  /** How a run authenticates (never the secret). */
+  authInfo(runId: string): { source: AuthSource; location?: string; profile?: string } {
+    const r = this.db.getRun(runId)?.request as PersistedRunRequest | undefined;
+    return { source: r?.authSource ?? (r?.authProfile ? 'profile' : 'none'), location: r?.authLocation, profile: r?.authProfile };
   }
 
   /** Runs found in a non-terminal state (process died mid-run). */
   interruptedRuns(): RunRecord[] { return this.db.listIncompleteRuns().filter((r) => !this.active.has(r.id)); }
 
-  private launch(runId: string): void {
+  private launch(runId: string, auth?: AuthConfig): void {
     const run = this.db.getRun(runId)!;
     const cfg = run.config as QAConfig;
     const abort = new AbortController();
     const snapshot = emptySnapshot(runId, run.status);
     const timer = setTimeout(() => abort.abort('timeout'), cfg.timeouts.runMs);
-    const hooks = { signal: abort.signal, snapshot, emit: (type: ProgressEventType, message: string, data?: Record<string, unknown>) => this.emit(runId, type, message, data) };
+    // `auth` is captured only by this closure/executor and released when the run ends (the executor is not retained).
+    const hooks = { signal: abort.signal, snapshot, auth, emit: (type: ProgressEventType, message: string, data?: Record<string, unknown>) => this.emit(runId, type, message, data) };
     const executor = new RunExecutor(this.opts, runId, hooks);
     const done = executor.execute().catch((e) => {
       this.db.setStatus(runId, 'ERROR', { error: e instanceof Error ? e.message : String(e) });

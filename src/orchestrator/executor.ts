@@ -17,7 +17,7 @@ import { buildRegistry, type RuleRegistry } from '../rules/index.js';
 import type { AuthProfileResolver } from '../shared/authProfiles.js';
 import type { QAConfig } from '../shared/config.js';
 import type { Redactor } from '../shared/redactor.js';
-import type { RunRequest } from '../shared/runRequest.js';
+import type { PersistedRunRequest } from '../shared/runRequest.js';
 import type { AuthConfig, Finding, Viewport } from '../shared/types.js';
 import { BaselineStore, VisualTester } from '../visual/index.js';
 import type { ProgressEventType, ProgressSnapshot } from './progress.js';
@@ -40,6 +40,8 @@ export interface ExecutorHooks {
   signal: AbortSignal;
   emit(type: ProgressEventType, message: string, data?: Record<string, unknown>): void;
   snapshot: ProgressSnapshot;
+  /** One-time token given with the URL. In memory only; never part of persisted run data. */
+  auth?: AuthConfig;
 }
 
 class StopRun extends Error { constructor(readonly reason: string) { super(reason); } }
@@ -55,7 +57,7 @@ export class RunExecutor {
   private readonly db: QADatabase;
   private run!: RunRecord;
   private config!: QAConfig;
-  private request!: RunRequest;
+  private request!: PersistedRunRequest;
   private state!: RunState;
   private controller?: BrowserController;
   private guard!: ActionGuard;
@@ -99,7 +101,7 @@ export class RunExecutor {
     if (!run) throw new Error(`Unknown run ${this.runId}`);
     this.run = run;
     this.config = run.config as QAConfig;
-    this.request = run.request as RunRequest;
+    this.request = run.request as PersistedRunRequest;
     this.state = run.state ?? { phase: 'CREATED', testedUnits: [], actionsUsed: 0, testedLinks: [] };
     this.testedLinks = new Set(this.state.testedLinks);
     this.budget = new ActionBudget(this.config.maxActions);
@@ -165,15 +167,25 @@ export class RunExecutor {
     this.check();
     this.setStatus('AUTHENTICATING');
     let auth: AuthConfig | undefined;
-    if (this.request.authProfile) {
+    let authLabel = '';
+    if (this.request.authSource === 'token') {
+      // The token is never persisted, so a resumed run must be given it again.
+      if (!this.hooks.auth) throw new Error('This run used a one-time token, which is never stored. Provide the token again to resume it.');
+      auth = this.hooks.auth;
+      authLabel = `the supplied token (${auth.location})`;
+    } else if (this.request.authProfile) {
       auth = this.deps.profiles.resolve(this.request.authProfile); // throws (without the secret) when unavailable
-      this.deps.redactor.register(auth.jwt);
+      authLabel = `auth profile "${this.request.authProfile}"`;
     }
+    if (auth) this.deps.redactor.register(auth.jwt);
     const first = this.config.viewports[0]!;
+    // A Playwright trace records cookies, storage and request headers, i.e. the token itself: never trace authenticated runs.
+    const trace = this.deps.trace !== false && !auth;
+    if (auth && this.deps.trace !== false) this.hooks.emit('log', 'Playwright trace disabled for this run because it uses credentials');
     this.controller = await BrowserController.launch({
       baseUrl: this.request.url, viewport: first, auth, redactor: this.deps.redactor, ignoredEndpoints: this.config.ignoredEndpoints,
       actionTimeoutMs: this.config.timeouts.actionMs, navigationTimeoutMs: this.config.timeouts.navigationMs,
-      blockExternal: true, trace: this.deps.trace !== false, ...this.deps.launch,
+      blockExternal: true, ...this.deps.launch, trace,
     });
     this.guard = new ActionGuard({ keywords: this.config.dangerousActions.keywords, allowMethods: this.config.dangerousActions.allowMethods, origin: this.request.url });
     this.controller.setRequestGuard(this.guard.asRequestGuard());
@@ -182,8 +194,8 @@ export class RunExecutor {
     if (!nav.ok) throw new Error(`Target unreachable: ${nav.error}`);
     if (auth && (nav.status === 401 || nav.status === 403)) {
       this.insertSimple({ ruleId: 'auth.rejected', category: 'auth', severity: 'major', classification: 'anomaly', basis: null, page: this.request.url, viewport: first.name, element: null,
-        expected: 'The configured credentials are accepted by the target', actual: `Target returned HTTP ${nav.status} for the first request using auth profile "${this.request.authProfile}"`, evidence: [] });
-      this.hooks.emit('warning', `Auth profile "${this.request.authProfile}" was rejected (HTTP ${nav.status})`);
+        expected: 'The supplied credentials are accepted by the target', actual: `Target returned HTTP ${nav.status} for the first request using ${authLabel}`, evidence: [] });
+      this.hooks.emit('warning', `Credentials rejected: ${authLabel} got HTTP ${nav.status}. The token may be expired or placed in the wrong location.`);
     }
     this.action('auth', 'navigate', this.request.url, true, `HTTP ${nav.status ?? '?'}`);
   }

@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { EvidenceStore } from '../evidence/store.js';
 import { DecisionSchema, type FindingView } from '../database/types.js';
 import type { Platform } from '../orchestrator/bootstrap.js';
-import { RunRequestSchema } from '../shared/runRequest.js';
+import { DirectAuthSchema, RunRequestSchema } from '../shared/runRequest.js';
 
 const MAX_BODY = 256 * 1024;
 const MIME: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.json': 'application/json', '.png': 'image/png', '.ico': 'image/x-icon', '.map': 'application/json' };
@@ -14,6 +14,7 @@ const CREDENTIAL_KEYS = ['jwt', 'token', 'authorization', 'cookie', 'apikey', 'a
 class HttpError extends Error { constructor(readonly status: number, message: string) { super(message); } }
 
 const DecisionBody = z.object({ decision: DecisionSchema, note: z.string().max(2000).optional(), decidedBy: z.string().min(1).max(80).optional() }).strict();
+const ResumeBody = z.object({ auth: DirectAuthSchema.optional() }).strict();
 const BaselineBody = z.object({ page: z.string().url(), viewport: z.string().min(1).max(40), approvedBy: z.string().min(1).max(80).optional() }).strict();
 
 export interface ApiOptions { webDir?: string }
@@ -48,7 +49,7 @@ export function createApiServer(platform: Platform, opts: ApiOptions = {}): http
     const run = db.getRun(runId);
     if (!run) throw new HttpError(404, 'Run not found');
     return {
-      id: run.id, url: run.url, mode: run.mode, status: run.status, verdict: run.verdict, authProfile: run.authProfile, createdAt: run.createdAt, startedAt: run.startedAt,
+      id: run.id, url: run.url, mode: run.mode, status: run.status, verdict: run.verdict, authProfile: run.authProfile, auth: orch.authInfo(runId), createdAt: run.createdAt, startedAt: run.startedAt,
       finishedAt: run.finishedAt, error: run.error, abortReason: run.abortReason, summary: run.summary, active: orch.isActive(runId),
       interrupted: !orch.isActive(runId) && !['COMPLETED', 'ABORTED', 'ERROR', 'REVIEW'].includes(run.status),
       progress: orch.snapshot(runId),
@@ -127,12 +128,12 @@ export function createApiServer(platform: Platform, opts: ApiOptions = {}): http
       const body = await readJson(req);
       if (body && typeof body === 'object') {
         const bad = Object.keys(body).find((k) => CREDENTIAL_KEYS.includes(k.toLowerCase()));
-        if (bad) throw new HttpError(400, `"${bad}" must not be sent through the API. Credentials are configured on the server as an auth profile; pass "authProfile" (a name) instead.`);
+        if (bad) throw new HttpError(400, `Unexpected top-level field "${bad}". Send credentials as "auth": { "token", "location", "key"?, "scheme"? } (used in memory only, never stored), or reference a server-side "authProfile".`);
       }
       const parsed = RunRequestSchema.safeParse(body);
       if (!parsed.success) return send(res, 400, { error: 'Invalid request', issues: parsed.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })) });
       try { const run = orch.start(parsed.data); return send(res, 202, { runId: run.id }); } catch (e) {
-        throw new HttpError(/already in progress/.test((e as Error).message) ? 409 : 400, (e as Error).message);
+        throw new HttpError(/already in progress/.test((e as Error).message) ? 409 : 400, platform.redactor.redact((e as Error).message));
       }
     }
 
@@ -143,7 +144,9 @@ export function createApiServer(platform: Platform, opts: ApiOptions = {}): http
       if (sub === 'events' && m === 'GET') return serveSse(req, res, runId);
       if (sub === 'stop' && m === 'POST') { if (!db.getRun(runId)) throw new HttpError(404, 'Run not found'); return send(res, 200, { stopped: orch.abort(runId) }); }
       if (sub === 'resume' && m === 'POST') {
-        try { orch.resume(runId); return send(res, 202, { runId }); } catch (e) { throw new HttpError(409, (e as Error).message); }
+        const body = ResumeBody.safeParse(await readJson(req));
+        if (!body.success) throw new HttpError(400, 'Invalid resume request: expected optional { "auth": { "token", "location", "key"?, "scheme"? } }');
+        try { orch.resume(runId, body.data.auth); return send(res, 202, { runId }); } catch (e) { throw new HttpError(409, platform.redactor.redact((e as Error).message)); }
       }
       if (sub === 'findings' && m === 'GET') {
         if (!db.getRun(runId)) throw new HttpError(404, 'Run not found');

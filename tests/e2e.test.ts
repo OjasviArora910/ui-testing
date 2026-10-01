@@ -47,7 +47,8 @@ describe('end-to-end against the demo app', () => {
   });
 
   it('runs the whole pipeline, finds the planted defects, and stays quiet on legit UI', async () => {
-    const r = await post('/api/runs', { url: demo.url, mode: 'ai_assisted', authProfile: 'demo' });
+    // Token supplied together with the URL (the main login path): used in memory only.
+    const r = await post('/api/runs', { url: demo.url, mode: 'ai_assisted', auth: { token: DEMO_JWT, location: 'cookie', key: 'token' } });
     expect(r.status).toBe(202);
     const { runId } = await r.json() as { runId: string };
     expect((await post('/api/runs', { url: demo.url })).status).toBe(409); // one run at a time
@@ -55,6 +56,10 @@ describe('end-to-end against the demo app', () => {
     const run = await platform.orchestrator.whenDone(runId);
     expect(run.status).toBe('COMPLETED');
     expect(run.verdict).toBe('FAILED');
+    expect(JSON.stringify(run.request)).not.toContain(DEMO_JWT);
+    expect(run.request).toMatchObject({ authSource: 'token', authLocation: 'cookie' });
+    const runApi = await (await fetch(`${api.url}/api/runs/${runId}`)).text();
+    expect(runApi).not.toContain(DEMO_JWT);
 
     const findings = platform.orchestrator.db.listFindings(runId);
     const on = (p: string) => findings.filter((f) => new URL(f.page).pathname === p);
@@ -115,4 +120,18 @@ describe('end-to-end against the demo app', () => {
     // the persisted cursor allows resuming
     expect(run.state?.phase).toBeDefined();
   }, 120_000);
+
+  it('a run that used a one-time token cannot be resumed without supplying the token again', async () => {
+    const auth = { token: DEMO_JWT, location: 'cookie', key: 'token' };
+    const { runId } = await (await post('/api/runs', { url: demo.url, mode: 'deterministic', auth })).json() as { runId: string };
+    await new Promise((res) => setTimeout(res, 2000));
+    await post(`/api/runs/${runId}/stop`, {});
+    await platform.orchestrator.whenDone(runId);
+    platform.orchestrator.db.setStatus(runId, 'TESTING'); // simulate a crash mid-run
+    const without = await post(`/api/runs/${runId}/resume`, {});
+    expect(without.status).toBe(409);
+    expect(await without.text()).toMatch(/never stored/);
+    expect((await post(`/api/runs/${runId}/resume`, { auth })).status).toBe(202);
+    await platform.orchestrator.whenDone(runId);
+  }, 180_000);
 });

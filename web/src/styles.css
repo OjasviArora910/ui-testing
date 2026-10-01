@@ -50,3 +50,6 @@ dl { display: grid; grid-template-columns: 80px 1fr; gap: 4px 10px; margin: 8px 
 .decide { border-top: 1px solid #eaeef2; margin-top: 10px; padding-top: 10px; display: flex; flex-direction: column; gap: 8px; }
 .log { max-height: 520px; overflow: auto; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
 .log-line { padding: 2px 0; border-bottom: 1px solid #f6f8fa; } .t-error { color: #cf222e; } .t-warning { color: #9a6700; } .t-done { color: #1a7f37; }
+.token-box { border-left: 3px solid #0969da; padding: 4px 0 4px 10px; margin: 6px 0; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; } .grid2 label { font-weight: 400; font-size: 12px; }
+.resume-box { margin-top: 10px; max-width: 420px; }

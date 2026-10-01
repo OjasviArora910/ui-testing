@@ -48,15 +48,33 @@ The goal, given as a long specification prompt (Appendix A), was to build a comp
 | 11 | Pasted terminal output showing `npm test` failures. | The output came from **before** the session's changes (it showed 3 test files and the old typecheck script). Gave the corrected commands: approve blocked install scripts, PowerShell env-var syntax, winget `--source winget`. |
 | 12 | Gave `https://github.com/OjasviArora910/ui-testing.git`. | Pushed `main`. |
 | 13 | "Update the README and push a docs folder with this whole chat session." | This file, plus README updates. |
+| 14 | "Show the current architecture with a basic diagram." | Gave ASCII diagrams of the components, the run lifecycle, and the safety/truth rules. |
+| 15 | "If a URL needs login, let the user give the JWT together with the URL; the JWT must not be stored anywhere." | **Changed the login design (supersedes step 4).** The dashboard, API and CLI accept a one-time token with the URL; it is kept in memory only. Profiles remain as an optional alternative. Details under [Credentials](#credentials-one-time-token-given-with-the-url). |
 
 ---
 
 ## Decisions and their reasons
 
-### Credentials stay on the server (auth profiles)
-- **Decision:** the dashboard and API never accept a raw JWT. `qa.auth.json` (gitignored) defines named profiles: `{ location, key?, scheme?, source: { env } | { file } }`. The API rejects any request body containing `jwt`, `token`, `authorization`, `cookie`, `apikey`, `password` or `secret` keys, and `RunRequestSchema` is `.strict()`.
-- **Why:** the browser is driven by the backend, so the frontend never needs the token. Keeping it off the UI avoids leaking it through browser memory, request logs or proxies. It also makes runs resumable after a restart: only the profile name is persisted, and the token is re-resolved when the run resumes.
-- **Code:** `src/shared/authProfiles.ts`, `src/shared/runRequest.ts`, `src/api/server.ts`.
+### Credentials: one-time token given with the URL
+*(Timeline step 15. This replaced the earlier "server-only auth profiles" design from step 4, which is kept as an optional alternative.)*
+
+- **Decision:** the user supplies the JWT together with the URL: `RunRequest.auth = { token, location: cookie|localStorage|sessionStorage|header, key?, scheme? }`. The token is never stored anywhere.
+- **How "never stored" is enforced:**
+  - `Orchestrator.start` registers the token with the central `Redactor` before anything else.
+  - It persists only `toPersisted(request)`, which records `authSource: 'token'` and `authLocation`, never the token.
+  - The token reaches the `RunExecutor` only through in-memory `ExecutorHooks.auth`, released when the run ends.
+  - Playwright tracing is forced off for any run with credentials, because trace files contain cookies, storage and request headers.
+  - API errors are redacted, and the API never returns the token (`GET /api/runs/:id` exposes only `auth: { source, location }`).
+  - The dashboard field is a masked input with autofill disabled, cleared immediately after submit.
+  - The CLI reads the token from an env var named by `--token-env`, never from an argument (shell history and process lists).
+- **Consequence:** an interrupted token run cannot auto-resume after a restart. `POST /api/runs/:id/resume` returns 409 unless the token is supplied again (`{ "auth": {...} }`); the dashboard shows a "Resume…" form for this.
+- **Known residual risks:**
+  - Screenshots cannot be redacted, so if an app renders the token on screen it appears in screenshots (local disk only).
+  - The token travels in the start request, so use localhost or HTTPS.
+- **Validation:** `RunRequestSchema` rejects a token and an `authProfile` together, an unknown `location`, and extra fields. A top-level `jwt`/`token`/`authorization` field is still rejected; tokens are accepted only inside `auth`.
+- **Code:** `src/shared/runRequest.ts` (`DirectAuthSchema`, `toPersisted`, `directAuthToConfig`), `src/orchestrator/orchestrator.ts` (`start`, `resume`, `authInfo`), `src/orchestrator/executor.ts` (`authenticate`), `src/api/server.ts`, `web/src/components/TokenFields.tsx`, `src/cli.ts`.
+- **Optional alternative:** server-side auth profiles (`qa.auth.json` → env var or file; `src/shared/authProfiles.ts`) for shared or CI setups.
+- **Tests (written, not yet run):** `tests/config.test.ts` (schema and `toPersisted`), `tests/e2e.test.ts` (the token run leaves no trace on disk or in the API, and resume without the token is refused).
 
 ### Testing modes
 The spec named a "Testing Mode" input but did not define it. Chosen values:
@@ -197,7 +215,7 @@ Places most likely to need adjustment when the unexecuted suites are first run:
 Give the assistant this file, STATUS.md and ARCHITECTURE.md, then a task such as: *"Run `npx vitest run tests/database.test.ts`, fix any failures without weakening the ground-truth or safety rules, and update STATUS.md."*
 
 Constraints that must be preserved:
-- Never accept credentials through the UI or API.
+- Never persist, log, trace or echo a token: it is accepted only inside `auth`, kept in memory for one run, and redacted everywhere.
 - Never let AI output change a finding's classification or basis.
 - Every defect needs a basis.
 - No destructive actions; all actions go through `ActionGuard`.
@@ -1100,4 +1118,4 @@ Then continue through the phases without rebuilding completed work.
 The goal is a **real working autonomous QA product**, not a tutorial or prototype consisting of disconnected examples.
 ````
 
-**Deviation from the original spec:** the dashboard does not take a raw JWT or JWT location. Following the user's direction in timeline step 4, it takes an **auth profile name**. The location and secret source are configured on the server (`qa.auth.json`).
+**Relation to the original spec:** the dashboard takes the JWT and JWT location together with the URL, as the spec describes, with one addition: the token is kept in memory for that run only and never stored (timeline step 15). Server-side auth profiles are an optional extra.

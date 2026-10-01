@@ -3,21 +3,24 @@ import fs from 'node:fs';
 import { startApi } from './api/index.js';
 import { startDemoApp, DEMO_JWT } from '../demo-app/server.js';
 import { createPlatform } from './orchestrator/bootstrap.js';
-import { RunRequestSchema, TestModeSchema } from './shared/runRequest.js';
+import { DirectAuthSchema, RunRequestSchema, TestModeSchema, type DirectAuth } from './shared/runRequest.js';
 
 const HELP = `Autonomous UI/UX QA Platform
 
 Usage:
   qa serve   [--port 4000] [--host 127.0.0.1]     Start API + dashboard (build the dashboard first: npm run web:build)
   qa demo    [--port 3000]                        Start the intentionally broken demo app
-  qa run     --url <url> [--profile <name>] [--mode deterministic|ai_assisted|exploratory]
+  qa run     --url <url> [--token-env VAR --token-location cookie|localStorage|sessionStorage|header [--token-key K]] | [--profile <name>]
+             [--mode deterministic|ai_assisted|exploratory]
              [--max-pages N] [--max-depth N] [--max-actions N] [--viewports desktop,tablet,mobile]
                                                   Run one test headlessly; exit code 0=PASS/WARN, 1=FAILED, 2=BLOCKED_PENDING_REVIEW, 3=error
   qa runs                                         List recent runs
   qa resume  <runId>                              Resume an interrupted run
   qa baseline --run <id> --page <url> --viewport <name> [--by <name>]   Approve a run's screenshot as the visual baseline (human action)
 
-Credentials are never passed on the command line: define auth profiles in qa.auth.json and reference them by name.`;
+Tokens are never passed as arguments (shell history/process list). Put the token in an environment variable and name it
+with --token-env (used in memory only, never stored), or reference a server-side auth profile with --profile.
+Resuming a token-based run needs the same --token-env/--token-location flags.`;
 
 function parseArgs(argv: string[]): { cmd: string; positional: string[]; flags: Record<string, string> } {
   const [cmd = 'help', ...rest] = argv; const flags: Record<string, string> = {}; const positional: string[] = [];
@@ -26,6 +29,16 @@ function parseArgs(argv: string[]): { cmd: string; positional: string[]; flags: 
     if (a.startsWith('--')) { const next = rest[i + 1]; if (next === undefined || next.startsWith('--')) flags[a.slice(2)] = 'true'; else { flags[a.slice(2)] = next; i++; } } else positional.push(a);
   }
   return { cmd, positional, flags };
+}
+
+/** Reads a one-time token from the env var named by --token-env. Throws (without the value) when misconfigured. */
+function tokenFromEnv(flags: Record<string, string>): DirectAuth | undefined {
+  if (!flags['token-env']) return undefined;
+  const token = process.env[flags['token-env']];
+  if (!token) throw new Error(`Environment variable ${flags['token-env']} is empty or not set`);
+  const parsed = DirectAuthSchema.safeParse({ token, location: flags['token-location'] ?? 'cookie', ...(flags['token-key'] ? { key: flags['token-key'] } : {}) });
+  if (!parsed.success) throw new Error('Invalid --token-location (cookie | localStorage | sessionStorage | header)');
+  return parsed.data;
 }
 
 async function main(): Promise<number> {
@@ -76,7 +89,7 @@ async function main(): Promise<number> {
     let runId: string;
     if (cmd === 'resume') {
       if (!positional[0]) { console.error('Usage: qa resume <runId>'); return 3; }
-      runId = orch.resume(positional[0]).id;
+      runId = orch.resume(positional[0], tokenFromEnv(flags)).id;
     } else {
       const mode = TestModeSchema.safeParse(flags.mode ?? 'deterministic');
       if (!mode.success) { console.error('Invalid --mode'); return 3; }
@@ -86,7 +99,8 @@ async function main(): Promise<number> {
       if (flags['max-pages']) overrides.maxPages = Number(flags['max-pages']);
       if (flags['max-depth']) overrides.maxDepth = Number(flags['max-depth']);
       if (flags['max-actions']) overrides.maxActions = Number(flags['max-actions']);
-      const req = RunRequestSchema.safeParse({ url: flags.url, authProfile: flags.profile, mode: mode.data, ...(vps?.length ? { viewports: vps } : {}), ...(Object.keys(overrides).length ? { overrides } : {}) });
+      const auth = tokenFromEnv(flags);
+      const req = RunRequestSchema.safeParse({ url: flags.url, ...(auth ? { auth } : {}), authProfile: flags.profile, mode: mode.data, ...(vps?.length ? { viewports: vps } : {}), ...(Object.keys(overrides).length ? { overrides } : {}) });
       if (!req.success) { console.error(`Invalid arguments: ${req.error.issues.map((i) => `${i.path.join('.') || 'url'}: ${i.message}`).join('; ')}`); return 3; }
       runId = orch.start(req.data).id;
     }
