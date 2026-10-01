@@ -46,4 +46,4 @@ Executed during development (all green at the time): `browser` 16, `config` 8, `
 Run the full suite (`npm test`), fix anything the unexecuted suites reveal, then a live smoke test with your AI key.
 
 ## Commands
-See README.md.
+See README.md. Hand-over notes and session history: docs/SESSION.md.

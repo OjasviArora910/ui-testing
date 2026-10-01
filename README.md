@@ -2,16 +2,28 @@
 
 Point it at a web app URL. It crawls the site with a real browser and tests buttons, links and forms safely. It checks layout, responsiveness, accessibility, network/console errors and visual regressions. It stores evidence for every problem, and then uses AI to explain and prioritise the findings. A defect is only reported when a rule, measurement, baseline or human backs it up. Anything weaker goes to a human review queue.
 
+> **Picking this project up?** Read [docs/SESSION.md](docs/SESSION.md) first. It records what was built, the decisions made, what is tested and what is not, and the next steps. Then read [STATUS.md](STATUS.md) and [ARCHITECTURE.md](ARCHITECTURE.md).
+
+## Project status
+- All 15 planned phases are implemented. Backend and dashboard typecheck cleanly.
+- Test suites for phases 1–8 (browser, config, discovery, rules, functional, accessibility, visual) passed during development.
+- Test suites for phases 9–15 (`database`, `ai`, `agent`, `reporting`, `e2e`) are written but have **not been run yet**. Run them first, see [Tests](#tests).
+- AI features need an API key (not yet configured). Everything else works without one.
+
 ## Requirements
 - Node.js 22.9+ (developed on Node 24)
 - Chromium for Playwright: `npx playwright install chromium`
+- Windows, macOS or Linux. Commands below are given for PowerShell and bash where they differ.
 
 ## Install
 ```bash
-cd qa-platform
+git clone https://github.com/OjasviArora910/ui-testing.git
+cd ui-testing
+npm install-scripts approve better-sqlite3 esbuild   # npm may block these native/install scripts; both are required
 npm install
 npx playwright install chromium
 ```
+If `npm install` warns that install scripts were blocked, run the `approve` line and then `npm install` again. Without them, the SQLite database (better-sqlite3) and the dashboard build (esbuild/vite) fail.
 
 ## Quick start (demo app + dashboard)
 Use two terminals.
@@ -83,6 +95,23 @@ docker compose up --build
 npm test                 # all suites (they launch Chromium; the e2e suite takes a few minutes)
 npx vitest run tests/rules.test.ts     # one suite
 npm run typecheck
+```
+Tests use Playwright's Chromium. In PowerShell, set environment variables with `$env:NAME = "value"; npm test`. The bash form `NAME=value npm test` does not work in PowerShell.
+
+Suggested order for a first run of the not-yet-executed suites:
+```bash
+npx vitest run tests/database.test.ts tests/reporting.test.ts tests/ai.test.ts   # fast, mostly no browser
+npx vitest run tests/agent.test.ts                                               # browser + mock LLM
+npx vitest run tests/e2e.test.ts                                                 # full pipeline, several minutes
+```
+
+## Repository layout
+```
+src/          backend (see ARCHITECTURE.md for the module map)
+web/          React + Vite dashboard
+demo-app/     intentionally broken app + legitimate-UI page used as ground truth
+tests/        vitest suites
+docs/         project history and hand-over notes (SESSION.md)
 ```
 
 ## Configuration
