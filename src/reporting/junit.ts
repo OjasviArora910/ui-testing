@@ -9,9 +9,13 @@ function name(f: ReportFinding): string {
   return `${f.ruleId} ${p} [${f.viewport}]${f.element ? ` ${f.element.selector}` : ''}`;
 }
 
-function testcase(f: ReportFinding): string {
+/** Accessibility is report-only unless required for the run: its rule-confirmed findings must not fail a CI job. */
+const advisory = (f: ReportFinding, a11yFails: boolean): boolean => f.track === 'accessibility' && !a11yFails && f.reviewState === 'defect';
+
+function testcase(f: ReportFinding, a11yFails: boolean): string {
   const body = `Expected: ${f.expected}\nActual: ${f.actual}\nPage: ${f.page}\nViewport: ${f.viewport}\nSeverity: ${f.severity}\nClassification: ${f.classification}${f.basis ? ` (${f.basis})` : ''}\nReview state: ${f.reviewState}`;
   const head = `<testcase classname="${xml(f.category)}" name="${xml(name(f))}">`;
+  if (advisory(f, a11yFails)) return `${head}<skipped message="Accessibility (report only): ${xml(f.actual.slice(0, 160))}"/><system-out>${xml(body)}</system-out></testcase>`;
   switch (f.reviewState) {
     case 'defect': case 'confirmed':
       return `${head}<failure type="${xml(f.severity)}" message="${xml(f.actual.slice(0, 200))}">${xml(body)}</failure></testcase>`;
@@ -33,10 +37,11 @@ export function renderJUnit(data: ReportData): string {
   const suites: string[] = [];
   let tests = 0; let failures = 0; let skipped = 0;
   for (const [cat, list] of byCat) {
-    const fl = list.filter((f) => f.reviewState === 'defect' || f.reviewState === 'confirmed').length;
-    const sk = list.filter((f) => f.reviewState === 'pending' || f.reviewState === 'investigating').length;
+    const a11yFails = data.accessibility.failRun;
+    const fl = list.filter((f) => (f.reviewState === 'defect' || f.reviewState === 'confirmed') && !advisory(f, a11yFails)).length;
+    const sk = list.filter((f) => f.reviewState === 'pending' || f.reviewState === 'investigating' || advisory(f, a11yFails)).length;
     tests += list.length; failures += fl; skipped += sk;
-    suites.push(`<testsuite name="${xml(cat)}" tests="${list.length}" failures="${fl}" errors="0" skipped="${sk}">${list.map(testcase).join('')}</testsuite>`);
+    suites.push(`<testsuite name="${xml(cat)}" tests="${list.length}" failures="${fl}" errors="0" skipped="${sk}">${list.map((f) => testcase(f, a11yFails)).join('')}</testsuite>`);
   }
   if (passing.length) {
     tests += passing.length;

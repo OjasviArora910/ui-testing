@@ -53,7 +53,7 @@ describe('ActionGuard', () => {
 describe('synthetic data', () => {
   it('generates valid and invalid values from field constraints', () => {
     const f = (o: object) => ({ selector: '#x', tag: 'input', type: 'text', name: '', label: '', placeholder: '', required: false, visible: true, disabled: false, ...o });
-    expect(validValue(f({ type: 'email' }))).toMatch(/@example\.com$/);
+    expect(validValue(f({ type: 'email' }))).toBe('john@maildrop.cc');
     expect(Number(validValue(f({ type: 'number', min: '18', max: '120' })))).toBeGreaterThanOrEqual(18);
     expect(invalidValue(f({ type: 'number', min: '18' }))).toBe('17');
     expect(invalidValue(f({ type: 'email' }))).toBe('not-an-email');

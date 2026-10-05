@@ -110,7 +110,7 @@ async function main(): Promise<number> {
     const run = await orch.whenDone(runId);
     const s = run.summary;
     console.log(`\nStatus: ${run.status}  Verdict: ${run.verdict ?? 'n/a'}`);
-    if (s) console.log(`Pages: ${s.pages}  Defects: ${s.defects}  To review: ${s.pendingReview}  Actions: ${s.actions}  Blocked by guard: ${s.guardBlocked}`);
+    if (s) console.log(`Pages: ${s.pages}  UI/UX bugs: ${s.counts?.bugs ?? s.defects}  Warnings: ${s.counts?.warnings ?? 0}  To review: ${s.pendingReview}  Accessibility: ${(s.counts?.accessibility ?? 0) + (s.counts?.accessibilityNeedsReview ?? 0)}  Actions: ${s.actions}  Blocked by guard: ${s.guardBlocked}`);
     if (run.error) console.log(`Error: ${run.error}`);
     for (const k of ['html', 'json', 'xml'] as const) { const f = orch.reportPath(runId, k); if (f) console.log(`Report (${k}): ${f}`); }
     if (run.status === 'ERROR') return 3;

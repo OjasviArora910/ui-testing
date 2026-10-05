@@ -5,7 +5,7 @@ import type { Redactor } from '../shared/redactor.js';
 
 export type EvidenceKind =
   | 'screenshot' | 'element-crop' | 'dom' | 'aria' | 'geometry' | 'network' | 'console'
-  | 'visual-baseline' | 'visual-current' | 'visual-diff' | 'trace' | 'metadata';
+  | 'visual-baseline' | 'visual-current' | 'visual-diff' | 'trace' | 'metadata' | 'action-trace';
 
 export interface EvidenceRef {
   /** Content-addressed id: `ev_<sha256 prefix>`. This is what findings reference. */

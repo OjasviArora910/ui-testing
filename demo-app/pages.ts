@@ -27,7 +27,7 @@ export function layout(title: string, body: string, extraHead = ''): string {
 
 export const PAGES: Record<string, string> = {
   '/': layout('Home', `<h1>Demo Application</h1><p>An intentionally broken app for validating the QA platform.</p>
-<ul><li><a href="/overlap">Overlapping content</a></li><li><a href="/clipping">Clipped text</a></li><li><a href="/overflow">Overflow and small targets</a></li><li><a href="/links">Broken links</a></li><li><a href="/errors">Console and network errors</a></li><li><a href="/forms">Forms</a></li><li><a href="/responsive">Responsive issues</a></li><li><a href="/modal">Modal</a></li><li><a href="/dynamic">Dynamic content</a></li><li><a href="/slow">Slow API</a></li><li><a href="/a11y">Accessibility problems</a></li><li><a href="/legit">Legitimate UI (no defects expected)</a></li><li><a href="/danger">Dangerous actions (must never be clicked)</a></li><li><a href="/account">Account (needs auth)</a></li></ul>`),
+<ul><li><a href="/overlap">Overlapping content</a></li><li><a href="/clipping">Clipped text</a></li><li><a href="/overflow">Overflow and small targets</a></li><li><a href="/links">Broken links</a></li><li><a href="/errors">Console and network errors</a></li><li><a href="/forms">Forms</a></li><li><a href="/responsive">Responsive issues</a></li><li><a href="/modal">Modal</a></li><li><a href="/dynamic">Dynamic content</a></li><li><a href="/slow">Slow API</a></li><li><a href="/a11y">Accessibility problems</a></li><li><a href="/legit">Legitimate UI (no defects expected)</a></li><li><a href="/danger">Dangerous actions (must never be clicked)</a></li><li><a href="/account">Account (needs auth)</a></li><li><a href="/marketing">Marketing page</a></li><li><a href="/login">Sign in</a></li><li><a href="/dashboard">Dashboard with search</a></li></ul>`),
 
   '/overlap': layout('Overlap', `<h1>Overlap</h1><div style="position:relative;height:260px">
 <div id="ov-text-a" style="position:absolute;top:20px;left:10px;width:320px;font-size:20px">Overlapping text block number one</div>
@@ -116,6 +116,48 @@ document.getElementById('who').textContent=r.ok?('Signed in as '+j.name):'Not si
 <p id="fake-out" role="status"></p>
 <div role="banana" id="bad-role">Invalid role</div>`),
 
+  // ---- pages for the dynamic test-selection demo: each one should make the same engine choose different tests
+  '/marketing': layout('Product', `<h1>Ship faster with Demo Cloud</h1><p>One platform for teams that build and run web applications.</p>
+<img src="/img/banner.svg" width="600" height="60" alt="Demo Cloud banner">
+<h2>Why teams choose us</h2>
+<div class="features" style="display:flex;margin:16px 0">
+<div class="feature" style="width:200px;padding:12px;border:1px solid #ccc;margin-right:16px"><h3 style="margin:0">Fast</h3><p>Deploy in seconds.</p></div>
+<div class="feature" style="width:200px;padding:12px;border:1px solid #ccc;margin-right:16px"><h3 style="margin:0">Secure</h3><p>Encrypted by default.</p></div>
+<div class="feature" style="width:200px;padding:12px;border:1px solid #ccc;margin-right:56px"><h3 style="margin:0">Simple</h3><p>No servers to manage.</p></div>
+<div class="feature" style="width:200px;padding:12px;border:1px solid #ccc"><h3 style="margin:0">Global</h3><p>Runs close to users.</p></div></div>
+<h2>Our team</h2><img id="team-photo" src="/img/photo.png" width="300" height="80" alt="The team at work">
+<h2>Learn more</h2><p>Read the <a href="/legit">product tour</a>, see <a href="/pricing-2019">legacy pricing</a> or open the <a href="/dashboard">dashboard</a>.</p>`),
+
+  '/login': layout('Sign in', `<h1>Sign in</h1>
+<form id="login" action="/api/login" method="post" aria-label="Sign in">
+<label for="login-email">Email</label><input id="login-email" name="email" type="email" required autocomplete="username">
+<label for="login-password">Password</label><input id="login-password" name="password" type="password" required autocomplete="current-password">
+<button type="submit" style="margin-top:12px;display:block">Sign in</button></form>
+<p id="login-msg" role="alert"></p>
+<script>document.getElementById('login').addEventListener('submit',(e)=>{e.preventDefault();fetch('/api/login',{method:'POST',body:new FormData(e.target)}).then(r=>{if(!r.ok)document.getElementById('login-msg').textContent='Invalid email or password.'}).catch(()=>{});});</script>`),
+
+  '/dashboard': layout('Dashboard', `<h1>Orders dashboard</h1>
+<form id="order-search" role="search" aria-label="Search orders" style="margin-bottom:12px"><label for="q">Search orders</label> <input id="q" name="q" type="search" placeholder="Customer or status"> <button type="submit">Search</button></form>
+<div style="margin-bottom:12px"><button id="filter-open" type="button">Filter: Open</button> <button id="filter-shipped" type="button">Filter: Shipped</button> <button id="export" type="button">Export CSV</button></div>
+<div role="tablist" aria-label="Views" style="margin-bottom:12px"><button role="tab" id="tab-orders" aria-selected="true" aria-controls="panel-orders">Orders</button> <button role="tab" id="tab-summary" aria-selected="false" aria-controls="panel-summary">Summary</button></div>
+<div id="panel-orders" role="tabpanel" aria-labelledby="tab-orders">
+<p id="order-count" role="status">6 orders</p>
+<table id="orders" style="border-collapse:collapse;width:100%"><caption>Recent orders</caption><thead><tr><th scope="col" style="text-align:left">Order</th><th scope="col" style="text-align:left">Customer</th><th scope="col" style="text-align:left">Status</th></tr></thead>
+<tbody><tr><td>#1001</td><td>Ada Test</td><td>Open</td></tr><tr><td>#1002</td><td>Ben Sample</td><td>Shipped</td></tr><tr><td>#1003</td><td>Cy Example</td><td>Open</td></tr>
+<tr><td>#1004</td><td>Di Placeholder</td><td>Shipped</td></tr><tr><td>#1005</td><td>Eli Test</td><td>Open</td></tr><tr><td>#1006</td><td>Fay Demo</td><td>Cancelled</td></tr></tbody></table>
+<div style="margin-top:12px"><button id="prev" type="button" aria-label="Previous page">Previous</button> <button id="next" type="button" aria-label="Next page">Next</button> <span id="page-no">Page 1 of 2</span></div></div>
+<div id="panel-summary" role="tabpanel" aria-labelledby="tab-summary" hidden><p>3 open, 2 shipped, 1 cancelled.</p></div>
+<script>(()=>{const rows=[...document.querySelectorAll('#orders tbody tr')];let page=1,filter='',term='';
+const render=()=>{const m=rows.filter(r=>r.textContent.toLowerCase().includes(term)&&(!filter||r.cells[2].textContent===filter));rows.forEach(r=>r.hidden=true);
+m.slice((page-1)*3,page*3).forEach(r=>r.hidden=false);document.getElementById('order-count').textContent=m.length+' orders';document.getElementById('page-no').textContent='Page '+page+' of '+Math.max(1,Math.ceil(m.length/3));};
+document.getElementById('order-search').addEventListener('submit',e=>{e.preventDefault();term=document.getElementById('q').value.toLowerCase();page=1;render();});
+document.getElementById('filter-open').addEventListener('click',()=>{filter='Open';page=1;render();});
+document.getElementById("filter-shipped").addEventListener("click",()=>{filter="Shipped";page=1;render();});
+document.getElementById('next').addEventListener('click',()=>{page=2;render();});document.getElementById('prev').addEventListener('click',()=>{page=1;render();});
+document.getElementById('export').addEventListener('click',()=>fetch('/api/fail').catch(()=>{}));
+const tabs=[...document.querySelectorAll('[role=tab]')];tabs.forEach(t=>t.addEventListener('click',()=>{tabs.forEach(x=>{x.setAttribute('aria-selected',String(x===t));document.getElementById(x.getAttribute('aria-controls')).hidden=x!==t;});}));
+render();})();</script>`),
+
   '/error-500': '<!doctype html><html lang="en"><head><title>Server error</title></head><body><main><h1>Internal Server Error</h1></main></body></html>',
 
   '/legit': layout('Legit UI', `<a href="#content" style="position:absolute;left:-10000px;top:auto;width:1px;height:1px;overflow:hidden">Skip to main content</a>
@@ -164,3 +206,15 @@ export const GROUND_TRUTH = {
   '/a11y': ['a11y.image-alt', 'a11y.color-contrast', 'a11y.keyboard.unreachable'],
 } as const;
 export const CLEAN_PAGES = ['/legit'] as const;
+
+/**
+ * Ground truth for dynamic test selection: what the classifier must detect on each page, and which scenarios the
+ * selector must (and must not) choose there. The same engine, no page-specific scripts.
+ */
+export const DYNAMIC_TRUTH = {
+  '/marketing': { types: ['MARKETING_CONTENT'], selected: ['links', 'images', 'layout'], notSelected: ['form-validation', 'login', 'search', 'modal'] },
+  '/forms': { types: ['FORM'], selected: ['form-validation'], notSelected: ['login', 'search', 'modal'] },
+  '/login': { types: ['LOGIN_AUTH'], selected: ['login'], notSelected: ['form-validation', 'search', 'modal'] },
+  '/dashboard': { types: ['DASHBOARD', 'SEARCH', 'TABLE_LIST'], selected: ['search', 'filters', 'tabs', 'table', 'pagination'], notSelected: ['form-validation', 'login', 'modal'] },
+  '/modal': { types: ['MODAL_DIALOG'], selected: ['modal'], notSelected: ['form-validation', 'login', 'search'] },
+} as const;

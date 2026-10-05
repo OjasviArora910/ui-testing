@@ -22,10 +22,22 @@ export interface ClassifiableElement {
   box?: { x: number; y: number; width: number; height: number };
 }
 
+/** PageModel elements keep their tag and input type in `meta`; expose them the way the classifier reads them. */
+export function toClassifiable(el: ModelElement): ClassifiableElement {
+  return {
+    selector: el.selector, role: el.role, name: el.name, text: el.text, href: el.href, box: el.box,
+    tag: typeof el.meta?.tag === 'string' ? el.meta.tag : undefined,
+    type: typeof el.meta?.inputType === 'string' ? el.meta.inputType : undefined,
+    aria: el.aria,
+  };
+}
+
 const MODAL_DISMISS_REGEX = /^(close|dismiss|cancel|cancelar|schlie[ßs]en|fermer|✕|×)$/i;
 const MODAL_OPEN_REGEX = /\b(modal|dialog|popup|lightbox|drawer)\b/i;
 const SEARCH_REGEX = /\b(search|find|lookup|query|filter-search)\b/i;
 const FILTER_SORT_REGEX = /\b(filter|sort|order by|reorder|ascending|descending|view all|all categories|show only)\b/i;
+const PAGINATE_NAMED = /\b(next|previous|prev|first|last) page\b|\bpage \d+\b|\bgo to page\b|\bpagination\b/i;
+const PAGINATE_BARE = /^(next|previous|prev|older|newer|[«»‹›<>]|\d{1,3})$/i;
 const SUBMIT_REGEX = /\b(submit|save|send|register|checkout|log in|sign in|sign up|create|update|apply changes|confirm)\b/i;
 
 /**
@@ -49,7 +61,7 @@ export function classifyElementIntent(
   if (role === 'tab' || lowerSel.includes('[role="tab"]') || lowerSel.includes('.tab') || lowerSel.includes('nav-tab')) {
     return {
       kind: 'SWITCH_TAB',
-      confidence: 'HIGH',
+      confidence: role === 'tab' ? 'HIGH' : 'MEDIUM', // a class name that merely contains "tab" is a guess
       summary: `Switch to tab "${label}"`,
       expectedOutcome: {
         description: `Tab "${label}" should become aria-selected="true" and reveal its associated tabpanel content`,
@@ -72,7 +84,7 @@ export function classifyElementIntent(
     const currentlyExpanded = el.aria?.expanded === 'true';
     return {
       kind: 'TOGGLE_ACCORDION',
-      confidence: 'HIGH',
+      confidence: tag === 'summary' || isAriaExpanded ? 'HIGH' : 'MEDIUM', // declared state vs. wording in a selector
       summary: `Toggle accordion/collapsible "${label}"`,
       expectedOutcome: {
         description: currentlyExpanded
@@ -170,13 +182,27 @@ export function classifyElementIntent(
     };
   }
 
+  // 7.5 PAGINATION: named page controls (aria-label / text naming a page) or bare next/previous/number controls
+  if (type !== 'submit' && (PAGINATE_NAMED.test(label) || PAGINATE_BARE.test(label) || /pagination|pager|page-(link|item|btn)/.test(lowerSel))) {
+    return {
+      kind: 'PAGINATE',
+      confidence: PAGINATE_NAMED.test(label) ? 'HIGH' : 'MEDIUM',
+      summary: `Go to another page of results via "${label}"`,
+      expectedOutcome: {
+        description: `Activating "${label}" shows a different page of results (the listed data, the current-page marker or the URL changes)`,
+        expectedDomMutation: true,
+        targetSelector: selector,
+      },
+    };
+  }
+
   // 8. FORM SUBMIT: Explicit submit buttons or submit actions inside forms
   const isSubmitType = type === 'submit';
   const isInsideForm = lowerSel.includes('form') || (model?.forms.some((f) => f.selector && selector.startsWith(f.selector)) ?? false);
   if (isSubmitType || (isInsideForm && SUBMIT_REGEX.test(lowerLabel))) {
     return {
       kind: 'SUBMIT_FORM',
-      confidence: 'HIGH',
+      confidence: isSubmitType ? 'HIGH' : 'MEDIUM',
       summary: `Submit form via button "${label}"`,
       expectedOutcome: {
         description: `Form submission should trigger client-side validation messages, an API POST/PUT request, or a confirmation state`,
@@ -189,7 +215,8 @@ export function classifyElementIntent(
   }
 
   // 9. NAVIGATION: Links or destination buttons
-  if (role === 'link' || tag === 'a' || (href && href !== '#' && !href.startsWith('javascript:'))) {
+  const scriptLink = href === '' || href === '#' || href.startsWith('javascript:') || /#$/.test(href); // an anchor used as a button
+  if (!scriptLink && (role === 'link' || tag === 'a' || href)) {
     return {
       kind: 'NAVIGATE',
       confidence: 'HIGH',

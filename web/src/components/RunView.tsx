@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api, type Finding, type ProgressEvent, type Run, type Severity, type Snapshot } from '../api';
+import { api, type DynamicData, type Finding, type ProgressEvent, type Run, type Severity, type Snapshot } from '../api';
+import { DynamicPanel } from './DynamicPanel';
 import { EvidenceModal, type EvidenceItem } from './EvidenceModal';
 import { FindingCard } from './FindingCard';
 import {
@@ -25,7 +26,7 @@ import { notify } from './Toast';
 import { emptyToken, toDirectAuth, TokenFields, type TokenState } from './TokenFields';
 import { VerdictBadge } from './VerdictBadge';
 
-type MainTab = 'findings' | 'review' | 'activity';
+type MainTab = 'findings' | 'accessibility' | 'selection' | 'review' | 'activity';
 
 const TERMINAL = ['COMPLETED', 'ABORTED', 'ERROR', 'REVIEW'];
 
@@ -61,6 +62,20 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
     meta: { page: string; viewport: string; ruleId: string };
   } | null>(null);
   const loadedFinal = useRef(false);
+  const [stopping, setStopping] = useState(false);
+  const stopRun = async () => {
+    setStopping(true);
+    try {
+      const r = await api.stop(runId);
+      if (r.stopped) notify.success('Stopping the run…'); else { notify.error('This run is not running any more.'); setStopping(false); }
+      await reload();
+      onChange();
+    } catch (e) {
+      setStopping(false);
+      notify.error((e as Error).message);
+    }
+  };
+  const [dynamic, setDynamic] = useState<DynamicData | null>(null);
 
   const toggleRuleExpand = (ruleId: string) => {
     setExpandedRules((prev) => ({ ...prev, [ruleId]: !prev[ruleId] }));
@@ -71,9 +86,10 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
       const r = await api.run(runId);
       setRun(r);
       if (r.progress) setSnap(r.progress);
-      const [q, f] = await Promise.all([api.queue(runId), api.findings(runId)]);
+      const [q, f, d] = await Promise.all([api.queue(runId), api.findings(runId), api.dynamic(runId).catch(() => null)]);
       setQueue(q);
       setFindings(f);
+      setDynamic(d);
     } catch (e) {
       setError((e as Error).message);
     }
@@ -90,6 +106,8 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
     es.addEventListener('progress', (e) => {
       const ev = JSON.parse((e as MessageEvent).data) as ProgressEvent;
       setEvents((prev) => (prev.some((p) => p.seq === ev.seq) ? prev : [...prev.slice(-400), ev]));
+      // a page was classified and its tests selected: show the decision while the run is still going
+      if (ev.type === 'page' && ev.data?.decision) void api.dynamic(runId).then(setDynamic).catch(() => undefined);
       if (ev.type === 'done' || ev.type === 'error' || (ev.type === 'status' && ev.message === 'REPORTING')) {
         void reload();
         onChange();
@@ -106,9 +124,24 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
     }
   }, [snap, reload]);
 
+  // Two separate tracks: UI/UX findings (is the interface broken?) and accessibility findings (can everyone use it?).
+  // A control can work correctly and still have an accessibility finding; that never counts as a UI/UX bug.
+  const isA11y = (f: Finding) => (f.track ? f.track === 'accessibility' : f.category === 'accessibility' || f.ruleId.startsWith('a11y.'));
+  const uiFindings = useMemo(() => findings.filter((f) => !isA11y(f)), [findings]);
+  const a11yFindings = useMemo(() => findings.filter(isA11y), [findings]);
+  const uiCounts = useMemo(() => ({
+    // distinct problems, not occurrences
+    bugs: new Set(uiFindings.filter((f) => f.resultClass === 'BUG').map((f) => f.problemKey ?? f.id)).size,
+    warnings: new Set(uiFindings.filter((f) => f.resultClass === 'WARNING').map((f) => f.problemKey ?? f.id)).size,
+    review: new Set(uiFindings.filter((f) => f.resultClass === 'NEEDS_REVIEW').map((f) => f.problemKey ?? f.id)).size,
+  }), [uiFindings]);
+  const showA11y = a11yFindings.length > 0 || !!dynamic?.accessibility.enabled;
+  const tested = dynamic?.results.length ?? 0;
+  const worked = dynamic?.results.filter((r) => r.classification === 'EXPECTED').length ?? 0;
+
   // Filtered & Sorted findings
   const filteredFindings = useMemo(() => {
-    return findings
+    return uiFindings
       .filter((f) => {
         if (severityFilter !== 'all' && f.severity !== severityFilter) return false;
         if (categoryFilter !== 'all' && f.category !== categoryFilter) return false;
@@ -133,9 +166,9 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
         if (sortBy === 'page') return a.page.localeCompare(b.page);
         return 0;
       });
-  }, [findings, severityFilter, categoryFilter, stateFilter, search, sortBy]);
+  }, [uiFindings, severityFilter, categoryFilter, stateFilter, search, sortBy]);
 
-  // Grouped findings by rule ID
+  // Grouped by underlying problem: the same failure on several elements, pages or viewports is one entry
   const groupedFindings = useMemo(() => {
     const map = new Map<string, {
       ruleId: string;
@@ -148,7 +181,7 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
     }>();
 
     for (const f of filteredFindings) {
-      const existing = map.get(f.ruleId);
+      const existing = map.get(f.problemKey ?? f.ruleId);
       if (existing) {
         existing.findings.push(f);
         existing.viewports.add(f.viewport);
@@ -157,7 +190,7 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
           existing.severity = f.severity;
         }
       } else {
-        map.set(f.ruleId, {
+        map.set(f.problemKey ?? f.ruleId, {
           ruleId: f.ruleId,
           category: f.category,
           severity: f.severity,
@@ -182,11 +215,11 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
   // Severity metrics breakdown
   const severityCounts = useMemo(() => {
     const counts = { critical: 0, major: 0, minor: 0, info: 0 };
-    for (const f of findings) {
+    for (const f of uiFindings) {
       if (f.severity in counts) counts[f.severity as keyof typeof counts]++;
     }
     return counts;
-  }, [findings]);
+  }, [uiFindings]);
 
   // Category counts
   const categoryCounts = useMemo(() => {
@@ -210,6 +243,7 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
 
   const s = snap ?? run.progress;
   const active = run.active || (s ? !TERMINAL.includes(s.status) && !run.interrupted : false);
+  const counts = (active ? s?.counts : undefined) ?? run.counts ?? s?.counts;
 
   async function act(fn: () => Promise<unknown>, successMsg?: string) {
     try {
@@ -255,15 +289,16 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
           </div>
 
           <div className="results-header-actions">
-            {run.verdict && !active && <VerdictBadge verdict={run.verdict} />}
+            {!active && run.state === 'ABORTED' ? <span className="verdict-pill v-ABORTED">ABORTED</span> : run.verdict && !active && <VerdictBadge verdict={run.verdict} />}
             {active && (
               <button
                 type="button"
                 className="btn btn-danger btn-cta-stop"
-                onClick={() => act(() => api.stop(runId), 'Stop request sent')}
+                disabled={stopping}
+                onClick={() => void stopRun()}
               >
                 <IconStop style={{ width: 14, height: 14 }} />
-                <span>STOP TEST</span>
+                <span>{stopping ? 'STOPPING…' : 'STOP TEST'}</span>
               </button>
             )}
 
@@ -379,50 +414,67 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
           status={s?.status ?? run.status}
           url={run.url}
           startTime={run.createdAt}
-          onStop={() => act(() => api.stop(runId), 'Stop requested')}
+          events={events}
+          onStop={() => void stopRun()}
+          stopping={stopping}
         />
       )}
 
-      {/* Hero Metrics Row */}
+      {/* What happened, in plain numbers. They come from what is saved, so they are right for a stopped run too. */}
+      {run.note && (
+        <div className={`run-note ${run.state === 'ERROR' ? 'run-note-error' : ''}`}>
+          <strong>{run.state === 'ERROR' ? 'FAILED' : 'ABORTED'}</strong> {run.note}
+        </div>
+      )}
       <section className="metrics-grid">
         <div className="metric-card">
-          <span className="metric-label">Execution Status</span>
-          <span className="metric-value">{s?.status ?? run.status}</span>
-          <span className="metric-sub">{active ? 'In progress' : run.finishedAt ? 'Completed run' : 'Finished'}</span>
+          <span className="metric-label">Status</span>
+          <span className="metric-value">{active ? 'RUNNING' : run.state ?? run.status}</span>
+          <span className="metric-sub">{active ? 'Results are saved as each element is tested' : run.state === 'ABORTED' ? 'Stopped before finishing' : run.state === 'COMPLETED' ? 'Finished' : ''}</span>
         </div>
 
         <div className="metric-card">
-          <span className="metric-label">Pages Crawled</span>
-          <span className="metric-value">{s?.pagesDiscovered ?? run.summary?.pages ?? 0}</span>
-          <span className="metric-sub">Same-origin routes</span>
+          <span className="metric-label">Pages</span>
+          <span className="metric-value">{counts ? `${counts.pagesTested}/${counts.pagesCrawled}` : '0'}</span>
+          <span className="metric-sub">tested / found</span>
         </div>
 
         <div className="metric-card">
-          <span className="metric-label">Pages Tested</span>
-          <span className="metric-value">
-            {s ? `${s.unitsDone}/${s.unitsTotal}` : `${run.summary?.pages ?? 0}`}
-          </span>
-          <span className="metric-sub">Desktop (1440 × 900)</span>
+          <span className="metric-label">Elements Tested</span>
+          <span className="metric-value metric-value-brand">{counts?.elementsTested ?? 0}</span>
+          <span className="metric-sub">buttons, links, controls, forms</span>
         </div>
 
         <div className="metric-card">
-          <span className="metric-label">Total Findings</span>
-          <span className="metric-value metric-value-danger">{findings.length || (s?.findings ?? 0)}</span>
-          <span className="metric-sub">
-            {run.summary?.defects ?? 0} defects · {queue.length} pending review
-          </span>
+          <span className="metric-label">Passed</span>
+          <span className="metric-value metric-value-success">{counts?.passed ?? 0}</span>
+          <span className="metric-sub">worked; not listed as findings{(counts?.inconclusive ?? 0) > 0 ? ` · ${counts?.inconclusive} had no visible effect` : ''}</span>
         </div>
 
         <div className="metric-card">
-          <span className="metric-label">ActionGuard Blocked</span>
-          <span className="metric-value metric-value-brand">{run.summary?.guardBlocked ?? 0}</span>
-          <span className="metric-sub">Destructive writes prevented</span>
+          <span className="metric-label">Bugs</span>
+          <span className="metric-value metric-value-danger">{counts?.bugs ?? 0}</span>
+          <span className="metric-sub">{counts?.warnings ?? 0} warnings</span>
         </div>
+
+        <div className="metric-card">
+          <span className="metric-label">Needs Review</span>
+          <span className="metric-value">{counts?.needsReview ?? 0}</span>
+          <span className="metric-sub">could not be decided</span>
+        </div>
+
+        {(active || run.state === 'ABORTED' || (counts?.notTestedPages ?? 0) + (counts?.notTestedElements ?? 0) > 0) && (
+          <div className="metric-card">
+            <span className="metric-label">Not Tested</span>
+            <span className="metric-value">{counts?.notTestedPages ?? 0}</span>
+            <span className="metric-sub">pages{(counts?.notTestedElements ?? 0) > 0 ? ` · ${counts?.notTestedElements} elements on started pages` : ''}</span>
+          </div>
+        )}
       </section>
 
 
       {/* Severity Breakdown Bar */}
-      {findings.length > 0 && (
+      {uiFindings.length > 0 && (
         <div className="visual-distribution-card">
           <div className="dist-header">
             <span className="dist-title">Findings Severity Distribution</span>
@@ -437,28 +489,28 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
             {severityCounts.critical > 0 && (
               <div
                 className="dist-segment bg-critical"
-                style={{ width: `${(severityCounts.critical / findings.length) * 100}%` }}
+                style={{ width: `${(severityCounts.critical / uiFindings.length) * 100}%` }}
                 title={`Critical: ${severityCounts.critical}`}
               />
             )}
             {severityCounts.major > 0 && (
               <div
                 className="dist-segment bg-major"
-                style={{ width: `${(severityCounts.major / findings.length) * 100}%` }}
+                style={{ width: `${(severityCounts.major / uiFindings.length) * 100}%` }}
                 title={`Major: ${severityCounts.major}`}
               />
             )}
             {severityCounts.minor > 0 && (
               <div
                 className="dist-segment bg-minor"
-                style={{ width: `${(severityCounts.minor / findings.length) * 100}%` }}
+                style={{ width: `${(severityCounts.minor / uiFindings.length) * 100}%` }}
                 title={`Minor: ${severityCounts.minor}`}
               />
             )}
             {severityCounts.info > 0 && (
               <div
                 className="dist-segment bg-info"
-                style={{ width: `${(severityCounts.info / findings.length) * 100}%` }}
+                style={{ width: `${(severityCounts.info / uiFindings.length) * 100}%` }}
                 title={`Info: ${severityCounts.info}`}
               />
             )}
@@ -485,6 +537,7 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
                 type="button"
                 className={`category-summary-card ${isSelected ? 'cat-card-selected' : ''}`}
                 onClick={() => {
+                  if (catKey === 'accessibility') { setTab('accessibility'); return; }
                   setTab('findings');
                   setCategoryFilter(isSelected ? 'all' : catKey);
                 }}
@@ -509,9 +562,33 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
           onClick={() => setTab('findings')}
         >
           <IconLayers style={{ width: 15, height: 15 }} />
-          <span>All Findings</span>
-          <span className="tab-counter-badge">{findings.length}</span>
+          <span>UI/UX Findings</span>
+          <span className="tab-counter-badge">{uiFindings.length}</span>
         </button>
+
+        {showA11y && (
+          <button
+            type="button"
+            className={`main-tab-item ${tab === 'accessibility' ? 'main-tab-active' : ''}`}
+            onClick={() => setTab('accessibility')}
+          >
+            <IconInfo style={{ width: 15, height: 15 }} />
+            <span>Accessibility</span>
+            <span className="tab-counter-badge">{a11yFindings.length}</span>
+          </button>
+        )}
+
+        {dynamic && dynamic.pages.length > 0 && (
+          <button
+            type="button"
+            className={`main-tab-item ${tab === 'selection' ? 'main-tab-active' : ''}`}
+            onClick={() => setTab('selection')}
+          >
+            <IconFilter style={{ width: 15, height: 15 }} />
+            <span>Tested Elements</span>
+            <span className="tab-counter-badge">{dynamic.pages.length}</span>
+          </button>
+        )}
 
         <button
           type="button"
@@ -640,8 +717,8 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
 
             <div className="results-count-banner" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
               <div>
-                Showing <strong>{filteredFindings.length}</strong> of <strong>{findings.length}</strong> findings
-                {viewMode === 'grouped' && ` (grouped into ${groupedFindings.length} distinct issue types)`}
+                Showing <strong>{filteredFindings.length}</strong> of <strong>{uiFindings.length}</strong> UI/UX findings
+                {viewMode === 'grouped' && ` (${groupedFindings.length} distinct problems)`}
               </div>
 
               <div className="view-mode-toggle">
@@ -666,15 +743,27 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
           </div>
 
           {/* Findings List */}
-          {filteredFindings.length === 0 ? (
+          {uiFindings.length === 0 && (run?.status === 'ERROR' || (run?.status === 'ABORTED' && (run.summary?.pages ?? 0) === 0)) ? (
+            <div className="empty-state-box">
+              <div className="empty-state-icon">
+                <IconAlertCircle style={{ width: 36, height: 36 }} className="text-danger" />
+              </div>
+              <h3 className="empty-state-title">Run failed: nothing was tested</h3>
+              <p className="empty-state-desc">
+                {run.error || run.abortReason || 'The run stopped before any page could be tested.'} No findings here does not mean the site is clean.
+              </p>
+            </div>
+          ) : filteredFindings.length === 0 ? (
             <div className="empty-state-box">
               <div className="empty-state-icon">
                 <IconCheck style={{ width: 36, height: 36 }} className="text-success" />
               </div>
               <h3 className="empty-state-title">No matching findings found</h3>
               <p className="empty-state-desc">
-                {findings.length === 0
-                  ? 'No issues were detected during this QA run. Everything verified cleanly!'
+                {uiFindings.length === 0
+                  ? (run?.summary?.pages ?? 0) > 0
+                    ? `${run?.state === 'ABORTED' ? 'The run was stopped. ' : ''}No UI/UX issues were detected on the ${run?.summary?.pages} page(s) tested${run?.state === 'ABORTED' ? ' before it stopped' : ' in this run'}.${a11yFindings.length ? ` ${a11yFindings.length} accessibility finding(s) are listed in the Accessibility tab.` : ''}`
+                    : run?.state === 'ABORTED' ? 'The run was stopped before a page was finished. See the counts above for what was tested.' : 'No findings yet.'
                   : 'Try clearing your search query or broadening your filters.'}
               </p>
             </div>
@@ -754,6 +843,42 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
       )}
 
       {/* TAB 2: REVIEW QUEUE */}
+      {/* TAB: accessibility findings, kept apart from UI/UX bugs */}
+      {tab === 'accessibility' && (
+        <div className="tab-findings-content animated-reveal">
+          <div className="a11y-banner">
+            <strong>Accessibility findings are a separate category from UI/UX bugs.</strong> An element listed here may look and work
+            correctly and still be hard or impossible to use with a screen reader or keyboard (for example an icon-only button with no
+            accessible name). {dynamic?.accessibility.failRun ? 'Accessibility is required for this run, so these findings affect the verdict.' : 'They do not affect this run\'s verdict.'}
+          </div>
+          {a11yFindings.length === 0 ? (
+            <div className="empty-state-box">
+              <h3 className="empty-state-title">No accessibility findings</h3>
+              <p className="empty-state-desc">{dynamic && !dynamic.accessibility.enabled ? 'Accessibility checks were switched off for this run.' : 'The automated accessibility checks reported nothing on the tested pages.'}</p>
+            </div>
+          ) : (
+            <div className="findings-stream">
+              {a11yFindings.map((f) => (
+                <FindingCard
+                  key={f.id}
+                  finding={f}
+                  onDecide={(d, note) => act(() => api.decide(f.id, d, note), `Decision saved: ${d}`)}
+                  onApproveBaseline={(p, v) => act(() => api.approveBaseline(runId, p, v), 'Baseline approved')}
+                  onViewEvidence={(item, meta) => setActiveEvidence({ item, meta })}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* TAB: what was detected per page and which tests were selected/skipped */}
+      {tab === 'selection' && dynamic && (
+        <div className="animated-reveal">
+          <DynamicPanel data={dynamic} />
+        </div>
+      )}
+
       {tab === 'review' && (
         <div className="tab-review-content animated-reveal">
           <ReviewQueueWizard

@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { QADatabase } from '../database/db.js';
 import type { Decision, FindingView, RunRecord } from '../database/types.js';
 import { reviewQueue } from '../database/review.js';
+import { runCounts } from '../reporting/data.js';
 import { generateReports } from '../reporting/index.js';
 import { ConfigSchema, deepMerge, type QAConfig } from '../shared/config.js';
 import { directAuthToConfig, toPersisted, type AuthSource, type DirectAuth, type PersistedRunRequest, type RunRequest } from '../shared/runRequest.js';
@@ -110,6 +111,20 @@ export class Orchestrator {
     return true;
   }
 
+  /**
+   * Stop a run that is not executing in this process any more (the server was restarted mid-run): there is nothing to
+   * signal, so the run is closed as ABORTED and a report is written from what it had already stored.
+   */
+  stopInterrupted(runId: string, reason = 'stopped by user'): boolean {
+    const run = this.db.getRun(runId);
+    if (!run || this.active.has(runId) || ['COMPLETED', 'ABORTED', 'ERROR'].includes(run.status)) return false;
+    this.db.setStatus(runId, 'ABORTED', { abortReason: `${reason} (the run was no longer executing)` });
+    try { generateReports(this.db, this.opts.evidence, runId, this.opts.reportsDir); } catch { /* best effort */ }
+    this.emit(runId, 'warning', `Run stopped: ${reason}`);
+    this.emit(runId, 'done', 'Run stopped', { incomplete: true });
+    return true;
+  }
+
   isActive(runId: string): boolean { return this.active.has(runId); }
   async whenDone(runId: string): Promise<RunRecord> {
     await this.active.get(runId)?.done;
@@ -143,12 +158,13 @@ export class Orchestrator {
     const findings = this.db.listFindings(runId).filter((f) => f.reviewState !== 'dismissed');
     const categories: Record<string, number> = {};
     for (const f of findings) categories[f.category] = (categories[f.category] ?? 0) + 1;
+    const counts = runCounts(this.db, runId);
     const pages = this.db.listPages(runId);
     const vps = (run.config as QAConfig).viewports.length;
     return {
       ...emptySnapshot(runId, run.status), pagesDiscovered: pages.length, unitsDone: run.state?.testedUnits.length ?? 0,
       unitsTotal: pages.filter((p) => p.model).length * vps, actionsUsed: run.state?.actionsUsed ?? 0, findings: findings.length, categories,
-      errors: run.error ? [run.error] : [],
+      errors: run.error ? [run.error] : [], counts,
     };
   }
 

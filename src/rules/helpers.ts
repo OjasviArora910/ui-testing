@@ -13,10 +13,11 @@ export interface FindingInit {
   expected: string;
   actual: string;
   evidence?: string[];
+  context?: Finding['context'];
 }
 
 /** Builds a Finding with the rule's defaults. The schema (not this helper) is what enforces "defect needs basis". */
-export function makeFinding(rule: Pick<Rule, 'id' | 'category' | 'severity' | 'basis'>, ctx: Pick<RuleContext, 'page' | 'viewport'>, init: FindingInit): Finding {
+export function makeFinding(rule: Pick<Rule, 'id' | 'category' | 'severity' | 'basis'> & { description?: string }, ctx: Pick<RuleContext, 'page' | 'viewport'>, init: FindingInit): Finding {
   return {
     ruleId: init.ruleId ?? rule.id,
     category: init.category ?? rule.category,
@@ -29,6 +30,8 @@ export function makeFinding(rule: Pick<Rule, 'id' | 'category' | 'severity' | 'b
     expected: init.expected,
     actual: init.actual,
     evidence: init.evidence ?? [],
+    // every finding says why it counts as a problem: the tester's reasoning when there is one, else the rule's own criterion
+    ...(init.context || rule.description ? { context: { ...init.context, why: init.context?.why ?? rule.description } } : {}),
   };
 }
 

@@ -31,6 +31,16 @@ export const FindingSchema = z.object({
   expected: z.string().min(1),
   actual: z.string().min(1),
   evidence: z.array(z.string()),
+  /** Why the test that produced this finding ran (dynamic selection). Informational: never part of the defect/anomaly contract. */
+  context: z.object({
+    resultId: z.string().optional(),
+    scenario: z.string().optional(),
+    pageType: z.string().optional(),
+    reason: z.string().optional(),
+    confidence: z.enum(['HIGH', 'MEDIUM', 'LOW']).optional(),
+    /** Why this observation means the UI is broken (the rule's criterion, or the tester's reasoning). */
+    why: z.string().optional(),
+  }).optional(),
 }).superRefine((f, ctx) => {
   if (f.classification === 'defect' && !f.basis) {
     ctx.addIssue({ code: 'custom', path: ['basis'], message: 'A defect requires a ground-truth basis' });

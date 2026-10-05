@@ -1,5 +1,5 @@
 import type { BrowserController } from '../browser/index.js';
-import type { FunctionalContext, InferredIntent, PostActionObservation, PreActionSnapshot } from './types.js';
+import type { ActionTrace, FunctionalContext, InferredIntent, PostActionObservation, PreActionSnapshot } from './types.js';
 
 interface RawDomState {
   title: string;
@@ -18,7 +18,13 @@ interface RawDomState {
     ariaControls: string | null;
     disabled: boolean;
     visible: boolean;
+    ariaPressed: string | null;
+    ariaCurrent: string | null;
+    text: string;
+    active: boolean;
+    controlled: { visible: boolean; height: number } | null;
   } | null;
+  signals: { layout: string; doc: string; form: string; text: string; attrs: string; overlays: string[] };
 }
 
 const EXTRACT_DOM_STATE_SCRIPT = `((targetSel) => {
@@ -26,12 +32,44 @@ const EXTRACT_DOM_STATE_SCRIPT = `((targetSel) => {
   if (!b) {
     return {
       title: '', bodyTextLength: 0, elementCount: 0, openDialogs: [], openMenus: [],
-      ariaExpanded: [], toasts: [], targetState: null
+      ariaExpanded: [], toasts: [], targetState: null, signals: { layout: '', doc: '', form: '', text: '', attrs: '', overlays: [] }
     };
   }
 
   const dialogNodes = Array.from(document.querySelectorAll('dialog[open], [role=dialog]:not([hidden]), [role=alertdialog]:not([hidden]), [aria-modal=true]:not([hidden])'));
   const openDialogs = dialogNodes.map((d, i) => d.id ? '#' + d.id : d.className ? '.' + String(d.className).trim().split(/\\s+/)[0] : 'dialog-' + i);
+
+  const hash = (str) => { let h = 5381; for (let i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) | 0; return String(h); };
+  const shown = (el) => { const r = el.getBoundingClientRect(); if (r.width <= 0 || r.height <= 0) return false; for (let n = el; n && n.nodeType === 1; n = n.parentElement) { const cs = getComputedStyle(n); if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity) === 0) return false; } return true; };
+  // Modal-like layers without dialog semantics: a shown, positioned layer above the page that covers a real share of the viewport.
+  const vw = innerWidth, vh = innerHeight;
+  const overlays = Array.from(b.querySelectorAll('*')).filter((el) => {
+    if (dialogNodes.includes(el) || dialogNodes.some((d) => d.contains(el))) return false;
+    const cs = getComputedStyle(el);
+    if (cs.position !== 'fixed' && !(cs.position === 'absolute' && parseInt(cs.zIndex) > 0)) return false;
+    const r = el.getBoundingClientRect();
+    const inView = Math.max(0, Math.min(r.right, vw) - Math.max(r.left, 0)) * Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
+    return inView >= vw * vh * 0.12 && shown(el);
+  }).slice(0, 20).map((el, i) => 'overlay:' + (el.id ? '#' + el.id : el.className ? '.' + String(el.className).trim().split(/\\s+/)[0] : el.tagName.toLowerCase() + i));
+
+  // Layout signature: any change in what is rendered where (expanding a panel, swapping a slide, re-ordering rows).
+  let layout = ''; let attrs = '';
+  const STATE_ATTRS = ['class', 'hidden', 'open', 'aria-hidden', 'aria-expanded', 'aria-selected', 'aria-checked', 'aria-pressed', 'aria-current', 'aria-disabled', 'disabled', 'data-state', 'data-active'];
+  const all = b.getElementsByTagName('*');
+  for (let i = 0; i < all.length && i < 4000; i++) {
+    // state carried by attributes: which slide/panel/item is active, shown or selected
+    for (const k of STATE_ATTRS) { const v = all[i].getAttribute(k); if (v !== null) attrs += k + '=' + v + ';'; }
+    // inline style in canonical form (screenshots rewrite the raw attribute on inputs without changing any style)
+    const css = all[i].style ? all[i].style.cssText.replace(/caret-color:[^;]*;?\s*/g, '') : ''; if (css) attrs += 'style=' + css + ';';
+    const r = all[i].getBoundingClientRect();
+    layout += Math.round(r.width) + 'x' + Math.round(r.height) + '@' + Math.round(r.left + scrollX) + ',' + Math.round(r.top + scrollY) + ';';
+  }
+  const root = document.documentElement;
+  const doc = [root.className, b.className, root.getAttribute('data-theme'), b.getAttribute('data-theme'), root.getAttribute('style'), getComputedStyle(b).backgroundColor, getComputedStyle(b).color, document.title].join('|');
+  const form = Array.from(document.querySelectorAll('input,select,textarea')).slice(0, 500)
+    .map((f) => [f.type, f.type === 'password' ? String(f.value).length : f.value, f.checked === true ? 1 : 0, f.selectedIndex, f.disabled ? 1 : 0, f.placeholder || ''].join(':')).join(';');
+  // content, not just its length: re-sorted rows, a counter going 0 -> 1, a swapped label
+  const signals = { layout: hash(layout), doc: hash(doc), form: hash(form), text: hash(b.innerText || ''), attrs: hash(attrs), overlays };
 
   const menuNodes = Array.from(document.querySelectorAll('[role=menu]:not([hidden]), [role=menubar]:not([hidden]), .dropdown-menu.show, .menu.open'));
   const openMenus = menuNodes.map((m, i) => m.id ? '#' + m.id : m.className ? '.' + String(m.className).trim().split(/\\s+/)[0] : 'menu-' + i);
@@ -60,6 +98,21 @@ const EXTRACT_DOM_STATE_SCRIPT = `((targetSel) => {
           ariaControls: el.getAttribute('aria-controls'),
           disabled: el.disabled === true || el.getAttribute('aria-disabled') === 'true',
           visible: cs.display !== 'none' && cs.visibility !== 'hidden' && parseFloat(cs.opacity) > 0,
+          ariaPressed: el.getAttribute('aria-pressed'),
+          ariaCurrent: el.getAttribute('aria-current'),
+          text: (el.innerText || el.textContent || el.value || '').replace(/\\s+/g, ' ').trim().slice(0, 80),
+          active: (() => {
+            const cur = el.getAttribute('aria-current');
+            if ((cur && cur !== 'false') || el.getAttribute('aria-selected') === 'true') return true;
+            return Array.from(el.classList || []).some((c) => /^(is-)?(active|current|selected)$/i.test(c));
+          })(),
+          controlled: (() => {
+            const id = el.getAttribute('aria-controls');
+            const region = (id && document.getElementById(id.split(/\\s+/)[0])) || el.nextElementSibling || (el.parentElement && el.parentElement.nextElementSibling);
+            if (!region) return null;
+            const r = region.getBoundingClientRect();
+            return { visible: shown(region), height: Math.round(r.height) };
+          })(),
         };
       }
     } catch {
@@ -76,6 +129,7 @@ const EXTRACT_DOM_STATE_SCRIPT = `((targetSel) => {
     ariaExpanded,
     toasts,
     targetState,
+    signals,
   };
 })`;
 
@@ -88,6 +142,7 @@ export async function capturePreActionSnapshot(
   options: { captureScreenshot?: boolean } = {},
 ): Promise<PreActionSnapshot> {
   const url = c.url;
+  const rawUrl = c.page.url();
   const netCount = c.events.network.length;
   const conCount = c.events.console.length;
   const timestamp = Date.now();
@@ -102,17 +157,22 @@ export async function capturePreActionSnapshot(
 
   return {
     url,
+    rawUrl,
     title: rawState.title,
     domDigest: `${rawState.bodyTextLength}|${rawState.elementCount}|${rawState.openDialogs.length}|${rawState.openMenus.length}`,
     elementCount: rawState.elementCount,
-    dialogsCount: rawState.openDialogs.length,
-    openDialogSelectors: rawState.openDialogs,
+    dialogsCount: rawState.openDialogs.length + rawState.signals.overlays.length,
+    openDialogSelectors: [...rawState.openDialogs, ...rawState.signals.overlays],
     openMenuSelectors: rawState.openMenus,
     ariaExpandedCount: rawState.ariaExpanded.length,
     toastsCount: rawState.toasts.length,
     targetState: rawState.targetState,
     networkCount: netCount,
     consoleCount: conCount,
+    blockedCount: c.blockedRequests.length,
+    signals: rawState.signals,
+    jsDialogCount: c.jsDialogs.length,
+    popupCount: c.popups.length,
     timestamp,
     screenshot: buf,
   };
@@ -178,8 +238,14 @@ export async function observeAction(
       break;
     }
 
+    // Nothing in flight: stop as soon as the page has visibly responded. If it has not yet, keep watching until the window
+    // closes, because many controls answer after a short delay (debounce, animation, timers) without any request.
     if (!hasInflight && elapsed >= 250) {
-      break;
+      const responded = await c.page
+        .evaluate("(document.body ? (document.body.innerText || '').length + '|' + document.body.getElementsByTagName('*').length : '') + '|' + location.href")
+        .then((now) => now !== `${pre.domDigest.split('|').slice(0, 2).join('|')}|${pre.rawUrl ?? ''}`)
+        .catch(() => true);
+      if (responded || elapsed >= maxWait - 60) break;
     }
 
     await new Promise((r) => setTimeout(r, 60));
@@ -188,6 +254,8 @@ export async function observeAction(
 
   // 3. Capture post-action state
   const finalUrl = c.url;
+  // following href="#" only appends an empty fragment: the page did not go anywhere
+  const sameUrl = (a: string, b: string): boolean => a.replace(/#$/, '') === b.replace(/#$/, '');
   const rawPost = (await c.page.evaluate(
     `(${EXTRACT_DOM_STATE_SCRIPT})(${JSON.stringify(targetSel || '')})`,
   )) as RawDomState;
@@ -199,17 +267,44 @@ export async function observeAction(
   const conSlice = c.events.console.slice(pre.consoleCount);
 
   // 4. Calculate transitions and diffs
-  const openedDialogs = rawPost.openDialogs.filter((d) => !pre.openDialogSelectors.includes(d));
-  const closedDialogs = pre.openDialogSelectors.filter((d) => !rawPost.openDialogs.includes(d));
+  // dialogs with semantics plus modal-like layers without them
+  const postDialogs = [...rawPost.openDialogs, ...rawPost.signals.overlays];
+  const openedDialogs = postDialogs.filter((d) => !pre.openDialogSelectors.includes(d));
+  const closedDialogs = pre.openDialogSelectors.filter((d) => !postDialogs.includes(d));
+  const jsDialogs = c.jsDialogs.slice(pre.jsDialogCount ?? c.jsDialogs.length).map((d) => `${d.type}: ${d.message}`);
+  const popups = c.popups.slice(pre.popupCount ?? c.popups.length).map((p) => p.url);
+
+  // State changes that add or remove no nodes: the control itself, the region it governs, layout, theme, form values.
+  const stateChanges: string[] = [];
+  const t0 = pre.targetState; const t1 = rawPost.targetState;
+  if (t0 && t1) {
+    if ((t0.ariaPressed ?? null) !== t1.ariaPressed) stateChanges.push(`aria-pressed: ${t0.ariaPressed ?? null} -> ${t1.ariaPressed}`);
+    if ((t0.ariaCurrent ?? null) !== t1.ariaCurrent) stateChanges.push(`aria-current: ${t0.ariaCurrent ?? null} -> ${t1.ariaCurrent}`);
+    if (t0.classes.join(' ') !== t1.classes.join(' ')) stateChanges.push(`control class: "${t0.classes.join(' ')}" -> "${t1.classes.join(' ')}"`);
+    if (t0.text !== undefined && t0.text !== t1.text) stateChanges.push(`control text: "${t0.text}" -> "${t1.text}"`);
+    if (t0.disabled !== t1.disabled) stateChanges.push(`control ${t1.disabled ? 'became disabled' : 'became enabled'}`);
+    if (t0.controlled && t1.controlled && (t0.controlled.visible !== t1.controlled.visible || Math.abs(t0.controlled.height - t1.controlled.height) > 1)) {
+      stateChanges.push(`governed region: ${t0.controlled.visible ? 'shown' : 'hidden'} ${t0.controlled.height}px -> ${t1.controlled.visible ? 'shown' : 'hidden'} ${t1.controlled.height}px`);
+    }
+  } else if (t0 && !t1) stateChanges.push('control was removed from the page');
+  if (pre.signals) {
+    if (pre.signals.layout !== rawPost.signals.layout) stateChanges.push('page layout changed (content shown, hidden, moved or resized)');
+    if (pre.signals.text !== undefined && pre.signals.text !== rawPost.signals.text) stateChanges.push('visible text changed');
+    if (pre.signals.doc !== rawPost.signals.doc) stateChanges.push('document theme/class/title changed');
+    if (pre.signals.attrs !== undefined && pre.signals.attrs !== rawPost.signals.attrs) stateChanges.push('an element changed state (class, hidden, style or ARIA state)');
+    if (pre.signals.form !== rawPost.signals.form) stateChanges.push('a form control changed value, type or checked state');
+  }
 
   const openedMenus = rawPost.openMenus.filter((m) => !pre.openMenuSelectors.includes(m));
   const closedMenus = pre.openMenuSelectors.filter((m) => !rawPost.openMenus.includes(m));
 
-  const newToasts = rawPost.toasts;
+  // only status/alert regions that were not already on screen before the action
+  const newToasts = rawPost.toasts.length > pre.toastsCount ? rawPost.toasts.slice(pre.toastsCount) : [];
 
   const domAdded = Math.max(0, rawPost.elementCount - pre.elementCount);
   const domRemoved = Math.max(0, pre.elementCount - rawPost.elementCount);
-  const textChanged = rawPost.bodyTextLength !== pre.domDigest.length;
+  // domDigest starts with the body text length captured before the action
+  const textChanged = rawPost.bodyTextLength !== Number(pre.domDigest.split('|')[0]);
 
   const attrChanges: string[] = [];
   if (pre.targetState && rawPost.targetState) {
@@ -224,7 +319,9 @@ export async function observeAction(
     }
   }
 
-  const networkRequests = netSlice.map((n) => ({
+  // Requests stopped by ActionGuard (and cancelled/ignored ones) are not application failures.
+  const blockedByGuard = c.blockedRequests.slice(pre.blockedCount ?? c.blockedRequests.length).map((b) => `${b.method} ${b.url}`);
+  const networkRequests = netSlice.filter((n) => !n.ignored && !n.blockedByGuard).map((n) => ({
     method: n.method,
     url: n.url,
     status: n.status,
@@ -239,15 +336,15 @@ export async function observeAction(
   );
 
   const consoleErrors = conSlice
-    .filter((x) => x.level === 'error' && x.kind === 'console')
+    .filter((x) => x.level === 'error' && x.kind === 'console' && !/Failed to load resource/i.test(x.text))
     .map((x) => x.text);
   const pageErrors = conSlice.filter((x) => x.kind === 'pageerror').map((x) => x.text);
 
   return {
     pre,
     finalUrl,
-    urlChanged: finalUrl !== pre.url,
-    navigated: finalUrl !== pre.url || c.page.url() !== pre.url,
+    urlChanged: !sameUrl(finalUrl, pre.url),
+    navigated: !sameUrl(finalUrl, pre.url),
     durationMs: Date.now() - start,
     domMutations: {
       addedNodesCount: domAdded,
@@ -259,7 +356,7 @@ export async function observeAction(
       opened: openedDialogs,
       closed: closedDialogs,
       countBefore: pre.dialogsCount,
-      countAfter: rawPost.openDialogs.length,
+      countAfter: postDialogs.length,
     },
     menus: {
       opened: openedMenus,
@@ -287,12 +384,36 @@ export async function observeAction(
       hasWrites,
       hasErrors: failedNet.length > 0,
       errorDetails,
+      blockedByGuard,
     },
     console: {
       errors: consoleErrors,
       pageErrors,
     },
     targetPostState: rawPost.targetState,
+    stateChanges, jsDialogs, popups,
     screenshot: postBuf,
+  };
+}
+
+/** The part of an observation that explains a result: only what this one action caused. */
+export function traceOf(action: string, o: PostActionObservation): ActionTrace {
+  return {
+    action, urlBefore: o.pre.url, urlAfter: o.finalUrl,
+    network: [...o.network.requests.map((n) => `${n.method} ${n.url} -> ${n.status ?? n.failure ?? 'pending'}`), ...(o.network.blockedByGuard ?? []).map((b) => `${b} -> blocked by ActionGuard`)],
+    console: [...o.console.pageErrors.map((e) => `uncaught: ${e}`), ...o.console.errors.map((e) => `console.error: ${e}`)],
+    changes: [
+      ...(o.urlChanged ? [`url: ${o.pre.url} -> ${o.finalUrl}`] : []),
+      ...o.dialogs.opened.map((d) => `dialog opened: ${d}`), ...o.dialogs.closed.map((d) => `dialog closed: ${d}`),
+      ...o.menus.opened.map((m) => `menu opened: ${m}`), ...o.menus.closed.map((m) => `menu closed: ${m}`),
+      ...o.domMutations.attributeChanges,
+      ...(o.stateChanges ?? []),
+      ...(o.jsDialogs ?? []).map((d) => `native dialog shown (${d})`),
+      ...(o.popups ?? []).map((p) => `popup window opened (${p || 'about:blank'})`),
+      ...(o.domMutations.addedNodesCount ? [`${o.domMutations.addedNodesCount} element(s) added`] : []),
+      ...(o.domMutations.removedNodesCount ? [`${o.domMutations.removedNodesCount} element(s) removed`] : []),
+      ...(o.domMutations.textChanged ? ['visible text changed'] : []),
+      ...o.toasts.appeared.map((t) => `status/alert text: ${t}`),
+    ],
   };
 }

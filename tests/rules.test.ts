@@ -9,7 +9,9 @@ import { ElementIndex } from '../src/geometry/primitives.js';
 import { launchForTest } from './helpers/launch.js';
 import type { BrowserController } from '../src/browser/index.js';
 
-const config = loadConfig('qa.config.json');
+// target size belongs to the optional accessibility category, so it is enabled here to keep that rule covered
+// ...and the diagnostics that are off by default (console warnings, slow requests, zero-size nodes) are switched on for the same reason
+const config = loadConfig('qa.config.json', { accessibility: { enabled: true }, rules: { disabled: [] } });
 
 describe('rule registry (plugin architecture)', () => {
   it('registers a new rule without touching any core code, and validates its findings', async () => {

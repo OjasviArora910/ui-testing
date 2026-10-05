@@ -1,6 +1,6 @@
 import { coveredBy, elementOf, resetPage, targetFor } from './helpers.js';
-import { classifyElementIntent } from './intent.js';
-import { capturePreActionSnapshot, observeAction } from './observer.js';
+import { classifyElementIntent, toClassifiable } from './intent.js';
+import { capturePreActionSnapshot, observeAction, traceOf } from './observer.js';
 import type { FunctionalContext, FunctionalResult } from './types.js';
 import { verifyInteraction } from './verifier.js';
 
@@ -11,13 +11,18 @@ export async function testButtons(ctx: FunctionalContext): Promise<FunctionalRes
   const { controller: c, guard, model, config } = ctx;
   const results: FunctionalResult[] = [];
   const submitSelectors = new Set(model.forms.map((f) => f.form.submit?.selector).filter(Boolean));
-  const buttons = model.buttons.filter((b) => !submitSelectors.has(b.selector)).slice(0, config.functional.maxButtonsPerPage);
+  // With a TestPlan only the controls it selected are exercised; without one, the first N buttons (legacy behaviour).
+  const items = ctx.plan
+    ? ctx.plan.buttons
+    : model.buttons.filter((b) => !submitSelectors.has(b.selector)).slice(0, config.functional.maxButtonsPerPage).map((element) => ({ element, scenario: undefined }));
 
-  for (const b of buttons) {
+  let pristine = false; // true while the page is exactly as loaded
+  for (const { element: b, scenario } of items) {
     if (ctx.budget.exhausted) break;
+    const push = (r: FunctionalResult): void => { const x = scenario ? { ...r, scenario } : r; results.push(x); ctx.onResult?.(x); };
     const el = elementOf(b);
     const label = b.name || b.text || b.selector;
-    const intent = classifyElementIntent(b, model);
+    const intent = classifyElementIntent(toClassifiable(b), model);
 
     // 0. Safety Guard check
     const decision = guard.check({ kind: 'click', name: b.name, text: b.text, selector: b.selector, role: b.role ?? undefined });
@@ -34,7 +39,7 @@ export async function testButtons(ctx: FunctionalContext): Promise<FunctionalRes
         detail: decision.reason,
         intent,
       });
-      results.push({
+      push({
         ...BASE,
         check: 'guard',
         status: 'skipped',
@@ -49,16 +54,17 @@ export async function testButtons(ctx: FunctionalContext): Promise<FunctionalRes
     }
 
     if (!b.visible) {
-      results.push({ ...BASE, check: 'visibility', status: 'skipped', severity: 'info', basis: null, element: el, expected: 'Visible', actual: 'Not visible; not tested' });
+      push({ ...BASE, check: 'visibility', status: 'skipped', severity: 'info', basis: null, element: el, expected: 'Visible', actual: 'Not visible; not tested' });
       continue;
     }
     if (!b.enabled) {
-      results.push({ ...BASE, check: 'enabled-state', status: 'pass', severity: 'info', basis: null, element: el, expected: 'Disabled button is exposed as disabled', actual: 'Button is disabled' });
+      push({ ...BASE, check: 'enabled-state', status: 'pass', severity: 'info', basis: null, element: el, expected: 'Disabled button is exposed as disabled', actual: 'Button is disabled' });
       continue;
     }
-    if (!(await resetPage(ctx))) break;
+    if (!pristine && !(await resetPage(ctx))) break;
+    pristine = false;
 
-    const target = targetFor(b, model.buttons);
+    const target = targetFor(b, [...model.buttons, ...model.tabs, ...model.checkboxes]);
     const loc = c.locate(target);
     const rawBox = (await loc.boundingBox().catch(() => null)) ?? b.box ?? null;
     const box = rawBox ? { ...rawBox, vpWidth: c.viewport.width, vpHeight: c.viewport.height } : null;
@@ -110,7 +116,7 @@ export async function testButtons(ctx: FunctionalContext): Promise<FunctionalRes
         box,
       });
 
-      results.push({
+      push({
         ...BASE,
         check: 'clickable',
         status: hard ? 'fail' : 'anomaly',
@@ -125,7 +131,7 @@ export async function testButtons(ctx: FunctionalContext): Promise<FunctionalRes
 
     if (!ctx.budget.consume()) break;
 
-    const needScreenshot = Boolean(ctx.onAction);
+    const needScreenshot = Boolean(ctx.onAction || ctx.plan);
 
     // 3. Pre-Action Baseline Capture
     const pre = await capturePreActionSnapshot(c, b.selector, { captureScreenshot: needScreenshot });
@@ -194,10 +200,30 @@ export async function testButtons(ctx: FunctionalContext): Promise<FunctionalRes
       durationMs: outcome.evidence?.durationMs,
     });
 
+    // Nothing at all happened: the page is still as loaded and the next control can be tested without reloading.
+    pristine = outcome.verdict === 'NEEDS_REVIEW' && !observation.urlChanged && (observation.stateChanges ?? []).length === 0 && observation.dialogs.opened.length === 0 && observation.network.requests.length === 0;
+
     // Translate verification outcome into functional result
-    if (outcome.verdict === 'FAIL') {
-      const isMajor = outcome.check === 'javascript-error' || outcome.check === 'network-failure';
-      results.push({
+    const proof = { before: pre.screenshot, screenshot: observation.screenshot, trace: traceOf(`click "${label}"`, observation) };
+    if (outcome.verdict === 'BLOCKED') {
+      push({
+        ...BASE,
+        check: outcome.check,
+        status: 'blocked',
+        severity: 'info',
+        basis: null,
+        element: el,
+        expected: outcome.expected,
+        actual: outcome.actual,
+        details: { reason: outcome.reason },
+        confidence: outcome.confidence,
+        ...proof,
+      });
+    } else if (outcome.verdict === 'FAIL') {
+      // The verifier only returns FAIL on hard runtime evidence or when a HIGH-confidence expectation was not met.
+      // A console.error line alone is a warning-level signal.
+      const isMajor = outcome.check !== 'console-error';
+      push({
         ...BASE,
         check: outcome.check,
         status: 'fail',
@@ -209,10 +235,10 @@ export async function testButtons(ctx: FunctionalContext): Promise<FunctionalRes
         details: { reason: outcome.reason, rootCause: outcome.rootCause, confidence: outcome.confidence },
         durationMs: outcome.evidence?.durationMs,
         confidence: outcome.confidence,
-        screenshot: observation.screenshot,
+        ...proof,
       });
     } else if (outcome.verdict === 'NEEDS_REVIEW') {
-      results.push({
+      push({
         ...BASE,
         check: outcome.check,
         status: 'anomaly',
@@ -224,10 +250,10 @@ export async function testButtons(ctx: FunctionalContext): Promise<FunctionalRes
         details: { reason: outcome.reason, confidence: outcome.confidence },
         durationMs: outcome.evidence?.durationMs,
         confidence: outcome.confidence,
-        screenshot: observation.screenshot,
+        ...proof,
       });
     } else {
-      results.push({
+      push({
         ...BASE,
         check: outcome.check,
         status: 'pass',

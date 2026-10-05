@@ -8,3 +8,6 @@ export * from './rules.js';
 export { testButtons } from './buttons.js';
 export { testLinks } from './links.js';
 export { testForms } from './forms.js';
+export { testSearch } from './search.js';
+export { testModals } from './modal.js';
+export { testFields } from './fields.js';

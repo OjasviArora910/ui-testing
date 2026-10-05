@@ -362,7 +362,7 @@ describe('Phase 3: Verification Decision Layer', () => {
       expect(outcome.actual).toContain('No immediate observable change detected');
     });
 
-    it('fails a high-visibility action (like "Save" or "Delete") if it produces zero feedback', () => {
+    it('sends a silent action button (like "Save") to review: no observable change alone is not proof of a bug', () => {
       const intent: InferredIntent = {
         kind: 'GENERAL_ACTION',
         confidence: 'HIGH',
@@ -381,9 +381,8 @@ describe('Phase 3: Verification Decision Layer', () => {
         selector: '#save-button',
       });
 
-      expect(outcome.verdict).toBe('FAIL');
-      expect(outcome.confidence).toBe('HIGH');
-      expect(outcome.actual).toContain('zero observable response');
+      expect(outcome.verdict).toBe('NEEDS_REVIEW');
+      expect(outcome.actual).toContain('No immediate observable change detected');
     });
   });
 });

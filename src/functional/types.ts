@@ -1,3 +1,4 @@
+import type { ScenarioRef } from '../dynamic/types.js';
 import type { BoundingBox, Basis, Severity } from '../shared/types.js';
 
 export type FunctionalKind =
@@ -11,7 +12,12 @@ export type FunctionalKind =
   | 'search'
   | 'interactive';
 
-export type FunctionalStatus = 'pass' | 'fail' | 'anomaly' | 'skipped';
+/** `blocked`: the UI action was performed but ActionGuard stopped the workflow, so the outcome is unverified (never a pass, never a defect). */
+/**
+ * `inconclusive`: the element was tested, nothing shows it is broken, and nothing proves it works either (for example a
+ * button of unclear purpose that changes nothing). It is counted as tested and is NOT reported.
+ */
+export type FunctionalStatus = 'pass' | 'fail' | 'anomaly' | 'inconclusive' | 'skipped' | 'blocked';
 
 export type ActionPhase = 'TARGETED' | 'MOVING' | 'CLICKING' | 'OBSERVING' | 'VERIFYING' | 'RESULT';
 export type VerificationVerdict = 'PASS' | 'FAIL' | 'NEEDS_REVIEW' | 'BLOCKED';
@@ -27,6 +33,7 @@ export type SemanticIntentKind =
   | 'FILTER_OR_SORT'
   | 'TOGGLE'
   | 'SEARCH'
+  | 'PAGINATE'
   | 'GENERAL_ACTION';
 
 export interface InferredIntent {
@@ -51,6 +58,8 @@ export interface InferredIntent {
 
 export interface PreActionSnapshot {
   url: string;
+  /** Unredacted location.href, used only to notice that the page moved. */
+  rawUrl?: string;
   title: string;
   domDigest: string;
   elementCount: number;
@@ -68,9 +77,23 @@ export interface PreActionSnapshot {
     ariaControls: string | null;
     disabled: boolean;
     visible: boolean;
+    /** aria-pressed / aria-current, class list as text, own text, and whether the control is already in its active state. */
+    ariaPressed?: string | null;
+    ariaCurrent?: string | null;
+    text?: string;
+    active?: boolean;
+    /** Rendered state of the region this control governs (aria-controls target, else its next sibling). */
+    controlled?: { visible: boolean; height: number } | null;
   } | null;
+  /** Page-wide signatures used to notice a state change that adds/removes no elements: layout, document theme/classes, form control values. */
+  signals?: { layout: string; doc: string; form: string; text?: string; attrs?: string; overlays: string[] };
+  /** Native dialogs and popups already opened before the action. */
+  jsDialogCount?: number;
+  popupCount?: number;
   networkCount: number;
   consoleCount: number;
+  /** Requests ActionGuard had already blocked before the action. */
+  blockedCount?: number;
   timestamp: number;
   screenshot?: Buffer;
 }
@@ -111,6 +134,8 @@ export interface PostActionObservation {
     hasWrites: boolean;
     hasErrors: boolean;
     errorDetails: string[];
+    /** Requests aborted by ActionGuard during the observation window. They are not application failures. */
+    blockedByGuard?: string[];
   };
   console: {
     errors: string[];
@@ -122,7 +147,19 @@ export interface PostActionObservation {
     ariaChecked: string | null;
     classes: string[];
     visible: boolean;
+    ariaPressed?: string | null;
+    ariaCurrent?: string | null;
+    active?: boolean;
+    controlled?: { visible: boolean; height: number } | null;
   } | null;
+  /**
+   * Interaction-relevant state changes that do not show up as added/removed nodes: the control's own state, the region it
+   * governs, layout, document theme, form control values. Each entry is a human-readable description.
+   */
+  stateChanges?: string[];
+  /** Native alert/confirm/prompt dialogs and popup windows opened by the action. */
+  jsDialogs?: string[];
+  popups?: string[];
   screenshot?: Buffer;
 }
 
@@ -161,9 +198,19 @@ export interface ActionLifecycleEvent {
   durationMs?: number;
 }
 
+/** What one action did, scoped to that action only. Stored as evidence for the finding it produced. */
+export interface ActionTrace {
+  action: string;
+  urlBefore?: string;
+  urlAfter?: string;
+  network: string[];
+  console: string[];
+  changes: string[];
+}
+
 /**
  * Outcome of one functional check. `fail` becomes a defect (it carries its own ground-truth basis);
- * `anomaly` goes to human review; `skipped` (e.g. blocked by ActionGuard) is recorded but is not a finding.
+ * `anomaly` goes to human review; `skipped` and `blocked` (ActionGuard) are recorded but are not findings.
  */
 export interface FunctionalResult {
   kind: FunctionalKind;
@@ -178,19 +225,31 @@ export interface FunctionalResult {
   details?: Record<string, unknown>;
   durationMs?: number;
   confidence?: ConfidenceLevel;
+  /** State AFTER the action (error state for failures). */
   screenshot?: Buffer;
+  /** State BEFORE the action. */
+  before?: Buffer;
+  trace?: ActionTrace;
+  /** Unique within one page run; lets a finding be tied back to exactly this result and its evidence. */
+  id?: string;
+  /** Why this test was selected (set when a dynamic TestPlan drives the run). */
+  scenario?: ScenarioRef;
 }
 
 import type { BrowserController } from '../browser/index.js';
 import type { PageModel } from '../discovery/types.js';
 import type { QAConfig } from '../shared/config.js';
+import type { TestPlan } from '../dynamic/types.js';
 import type { ActionGuard } from './actionGuard.js';
 
 /** Shared action budget (config.maxActions). Every navigation/click/fill performed by a test consumes one unit. */
 export class ActionBudget {
   used = 0;
   constructor(public readonly max: number) {}
-  get exhausted(): boolean { return this.used >= this.max; }
+  /** Set when the run is being stopped: every tester loop already checks the budget, so they all wind down at once. */
+  halted = false;
+  halt(): void { this.halted = true; }
+  get exhausted(): boolean { return this.halted || this.used >= this.max; }
   get remaining(): number { return Math.max(0, this.max - this.used); }
   /** Returns false when the budget is already spent (the caller must stop). */
   consume(n = 1): boolean { if (this.exhausted) return false; this.used += n; return true; }
@@ -206,6 +265,10 @@ export interface FunctionalContext {
   budget: ActionBudget;
   /** Link targets already tested during this run (site-wide nav links are only followed once). */
   testedLinks?: Set<string>;
+  /** Dynamic selection: when present, only the testers and elements it names are exercised. Absent => every generic suite runs. */
+  plan?: TestPlan;
+  /** Called once for every finished element test, as soon as it finishes, so progress can be saved continuously. */
+  onResult?: (r: FunctionalResult) => void;
   /** Real-time hook for orchestrator & simulator synchronization. */
   onAction?: (a: ActionLifecycleEvent) => void;
 }

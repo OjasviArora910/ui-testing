@@ -37,6 +37,10 @@ export class BrowserController {
   private lastStatus: number | undefined;
   /** Requests aborted by the request guard (method + redacted url). They are not application failures. */
   readonly blockedRequests: { method: string; url: string }[] = [];
+  /** Native alert/confirm/prompt dialogs the page opened (dismissed automatically). Opening one is an observable result of an action. */
+  readonly jsDialogs: { type: string; message: string }[] = [];
+  /** Popup windows/tabs the page opened (closed automatically; the run stays on the page under test). */
+  readonly popups: { url: string }[] = [];
 
   private constructor(private opts: BrowserControllerOptions) {
     this.redactor = opts.redactor ?? new Redactor();
@@ -76,6 +80,15 @@ export class BrowserController {
     if (this.opts.trace) { await this.context.tracing.start({ screenshots: true, snapshots: true }); this.tracing = true; }
     this._page = await this.context.newPage();
     this.events.attach(this._page);
+    this._page.on('dialog', (d) => {
+      this.jsDialogs.push({ type: d.type(), message: this.redactor.redact(d.message()).slice(0, 200) });
+      void (d.type() === 'beforeunload' ? d.accept() : d.dismiss()).catch(() => undefined);
+    });
+    this.context.on('page', (p) => {
+      if (p === this._page) return;
+      this.popups.push({ url: this.redactor.redactUrl(p.url()) });
+      void p.close().catch(() => undefined);
+    });
   }
 
   get page(): Page { return this._page; }
@@ -118,15 +131,48 @@ export class BrowserController {
       if (r && typeof r === 'object' && 'status' in r && typeof (r as { status: unknown }).status === 'function') status = (r as { status(): number }).status();
     } catch (e) { ok = false; error = this.redactor.redact(e instanceof Error ? e.message.split('\n')[0]! : String(e)); }
     this.lastStatus = status;
+    const partial = this.partialLoad; this.partialLoad = false;
     return {
-      ok, error, status, durationMs: Date.now() - t0, urlBefore, urlAfter: this.url,
+      ok, error, status, ...(partial && ok ? { partial } : {}), durationMs: Date.now() - t0, urlBefore, urlAfter: this.url,
       newNetworkEvents: this.events.network.length - n0, newConsoleErrors: this.events.errors().length - c0,
     };
   }
 
+  private partialLoad = false;
+
+  /**
+   * Staged navigation, so one slow or hanging resource cannot make a reachable page "unreachable":
+   *  1. wait for the server's response (commit). No response within the navigation timeout => genuinely unreachable.
+   *  2. wait for `load` for the rest of that same timeout.
+   *  3. if `load` did not arrive, proceed anyway when the document is usable (parsed, has a body). A document that is still
+   *     being parsed gets one bounded grace period (half the timeout) because a response proves the page is reachable.
+   * A page accepted in step 3 is flagged `partial` so callers can say that some resources never finished loading.
+   */
+  private async gotoUsable(go: (waitUntil: 'commit') => Promise<unknown>): Promise<unknown> {
+    const budget = this.opts.navigationTimeoutMs ?? 30000;
+    const t0 = Date.now();
+    this.partialLoad = false;
+    const response = await go('commit');
+    try {
+      await this._page.waitForLoadState('load', { timeout: Math.max(1000, budget - (Date.now() - t0)) });
+      return response;
+    } catch { /* still loading: decide below whether the page is usable */ }
+    const parsed = (): Promise<boolean> => this._page.evaluate("document.readyState !== 'loading' && !!document.body").then(Boolean).catch(() => false);
+    if (!(await parsed())) {
+      await this._page.waitForLoadState('domcontentloaded', { timeout: Math.ceil(budget / 2) }).catch(() => undefined);
+      // parser still blocked: accept only a document that already has rendered content
+      const hasContent = await this._page.evaluate("!!document.body && document.body.children.length > 0").then(Boolean).catch(() => false);
+      if (!(await parsed()) && !hasContent) {
+        throw new Error(`Page responded but its document never became usable within ${Math.round((Date.now() - t0) / 1000)}s (a resource in the page head is still loading)`);
+      }
+    }
+    this.partialLoad = true;
+    return response;
+  }
+
   navigate(url: string): Promise<ActionResult> {
     const abs = new URL(url, this.opts.baseUrl).toString();
-    return this.act(() => this._page.goto(abs, { waitUntil: 'load' }));
+    return this.act(() => this.gotoUsable((waitUntil) => this._page.goto(abs, { waitUntil })));
   }
   click(t: ElementTarget): Promise<ActionResult> { return this.act(() => this.locate(t).click()); }
   fill(t: ElementTarget, value: string): Promise<ActionResult> { return this.act(() => this.locate(t).fill(value)); }
@@ -147,7 +193,7 @@ export class BrowserController {
       })(${JSON.stringify({ to: opts.to, by: opts.by })})`);
     });
   }
-  reload(): Promise<ActionResult> { return this.act(() => this._page.reload({ waitUntil: 'load' })); }
+  reload(): Promise<ActionResult> { return this.act(() => this.gotoUsable((waitUntil) => this._page.reload({ waitUntil }))); }
   back(): Promise<ActionResult> { return this.act(() => this._page.goBack({ waitUntil: 'load' })); }
   forward(): Promise<ActionResult> { return this.act(() => this._page.goForward({ waitUntil: 'load' })); }
   /** Waits (at most maxMs) until no request has been in flight for 150ms. Used before snapshotting network activity. */

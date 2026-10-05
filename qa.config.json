@@ -1,22 +1,23 @@
 {
-  "maxPages": 20,
-  "maxActions": 100,
-  "maxDepth": 3,
-  "timeouts": { "navigationMs": 30000, "actionMs": 8000, "runMs": 900000 },
+  "maxPages": 100,
+  "maxActions": 5000,
+  "maxDepth": 10,
+  "timeouts": { "navigationMs": 30000, "actionMs": 8000, "runMs": 3600000 },
   "viewports": [
     { "name": "desktop", "width": 1440, "height": 900 },
     { "name": "tablet", "width": 768, "height": 1024 },
     { "name": "mobile", "width": 390, "height": 844 }
   ],
-  "rules": { "disabled": [], "severityOverrides": {}, "custom": [], "plugins": [] },
+  "rules": { "disabled": ["console.warning", "network.slow-request", "geometry.zero-size"], "severityOverrides": {}, "custom": [], "plugins": [] },
   "ignoredEndpoints": [],
   "dangerousActions": {
     "keywords": ["delete", "remove account", "purchase", "buy now", "pay", "checkout", "confirm payment", "deactivate", "close account", "unsubscribe all", "destroy", "wipe", "reset all"],
     "allowMethods": ["GET", "HEAD", "OPTIONS"]
   },
   "visualThresholds": { "maxDiffRatio": 0.01, "pixelThreshold": 0.1, "maskSelectors": [] },
-  "functional": { "submitValidForms": false, "maxButtonsPerPage": 15, "maxLinksPerPage": 15, "maxFormsPerPage": 5, "allViewports": false },
-  "accessibility": { "enabled": true, "keyboard": true, "allViewports": false },
+  "functional": { "submitValidForms": false, "maxButtonsPerPage": 300, "maxLinksPerPage": 300, "maxFormsPerPage": 30, "maxFieldsPerPage": 150, "allViewports": false },
+  "accessibility": { "enabled": false, "keyboard": true, "allViewports": false, "failRun": false },
+  "dynamic": { "enabled": true, "maxGenericButtons": 300, "consistencyChecks": false },
   "network": { "slowRequestMs": 3000 },
   "geometry": { "minTargetSize": 24, "overlapMinRatio": 0.2, "maxElements": 1500 },
   "ai": { "maxCalls": 20, "maxFindingsPerCall": 8, "sendScreenshots": false },

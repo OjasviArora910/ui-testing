@@ -61,7 +61,7 @@ export function RunList({
         <div className="history-list">
           {runs.map((r) => {
             const isSelected = selected === r.id;
-            const findingsCount = r.summary ? (r.summary.defects + r.summary.anomalies) : (r.progress?.findings ?? 0);
+            const findingsCount = r.summary ? (r.summary.defects + r.summary.anomalies) : (r.progress?.findings ?? 0); // UI/UX findings; accessibility is counted separately
             const pagesCount = r.summary?.pages ?? r.progress?.pagesDiscovered ?? 0;
 
             return (
@@ -84,8 +84,8 @@ export function RunList({
                   {r.verdict ? (
                     <VerdictBadge verdict={r.verdict} small />
                   ) : (
-                    <span className={`status-pill status-${r.status.toLowerCase()}`}>
-                      {r.status}
+                    <span className={`status-pill status-${(r.state ?? r.status).toLowerCase()}`}>
+                      {r.state ?? r.status}
                     </span>
                   )}
                   <span className="history-findings-pill">

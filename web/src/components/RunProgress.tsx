@@ -1,7 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { Snapshot } from '../api';
-import { IconCheck, IconExternalLink, IconSparkles } from './Icons';
-import { LiveSimulation } from './LiveSimulation';
+import type { ProgressEvent, Snapshot } from '../api';
 
 interface RunProgressProps {
   runId: string;
@@ -9,89 +7,42 @@ interface RunProgressProps {
   status: string;
   url: string;
   startTime?: string;
+  events: ProgressEvent[];
   onStop?: () => void;
+  stopping?: boolean;
 }
 
-interface Stage {
-  id: string;
-  title: string;
-  description: string;
-}
+const OUTCOME_LABEL: Record<string, string> = { EXPECTED: 'PASS', BUG: 'BUG', WARNING: 'WARNING', NEEDS_REVIEW: 'NEEDS REVIEW', BLOCKED_BY_SAFETY: 'BLOCKED', INCONCLUSIVE: 'NO EFFECT' };
+const pathOf = (u: string | null | undefined): string => {
+  if (!u) return '';
+  try {
+    const x = new URL(u);
+    return x.pathname + x.search;
+  } catch {
+    return u;
+  }
+};
 
-const STAGES: Stage[] = [
-  { id: 'auth', title: 'Authentication', description: 'Applying credentials & initializing browser context' },
-  { id: 'discovery', title: 'Page Discovery', description: 'Crawling same-origin routes & building PageModel' },
-  { id: 'geometry', title: 'Responsive & Geometry', description: 'Checking overlaps, clipping, container overflow & small targets' },
-  { id: 'accessibility', title: 'Accessibility Audit', description: 'Running axe-core, ARIA validation & keyboard traversal' },
-  { id: 'functional', title: 'Functional Testing', description: 'Safely testing buttons, links, and forms with ActionGuard' },
-  { id: 'ai', title: 'AI Analysis', description: 'Synthesizing evidence, prioritizing root causes & detecting false positives' },
-  { id: 'reporting', title: 'Final Report & Verdict', description: 'Generating self-contained HTML, JSON, and JUnit XML artifacts' },
-];
-
-export function RunProgress({ runId, snapshot, status, url, startTime, onStop }: RunProgressProps) {
+/** Live view of a running test: where it is, the numbers so far, and a plain log of each element tested and its result. */
+export function RunProgress({ runId, snapshot: s, status, url, startTime, events, onStop, stopping }: RunProgressProps) {
   const [elapsed, setElapsed] = useState(0);
+  const [tick, setTick] = useState(0);
 
   useEffect(() => {
     const start = startTime ? new Date(startTime).getTime() : Date.now();
     const interval = setInterval(() => {
       setElapsed(Math.floor((Date.now() - start) / 1000));
+      setTick((t) => t + 1);
     }, 1000);
     return () => clearInterval(interval);
   }, [startTime]);
 
-  const formatElapsed = (sec: number) => {
-    const m = Math.floor(sec / 60);
-    const s = sec % 60;
-    return `${m}:${s < 10 ? '0' : ''}${s}`;
-  };
-
-  const s = snapshot;
-  const pct = s && s.unitsTotal > 0 ? Math.min(100, Math.round((s.unitsDone / s.unitsTotal) * 100)) : 10;
-
-  // Determine active stage based on status or current action
-  const getStageState = (stageId: string): 'done' | 'active' | 'pending' => {
-    const st = status.toUpperCase();
-    if (st === 'COMPLETED') return 'done';
-
-    if (stageId === 'auth') {
-      if (st === 'AUTHENTICATING') return 'active';
-      return 'done';
-    }
-
-    if (stageId === 'discovery') {
-      if (st === 'AUTHENTICATING') return 'pending';
-      if (st === 'DISCOVERING') return 'active';
-      return 'done';
-    }
-
-    if (stageId === 'geometry' || stageId === 'accessibility' || stageId === 'functional') {
-      if (st === 'AUTHENTICATING' || st === 'DISCOVERING') return 'pending';
-      if (st === 'TESTING') {
-        const action = (s?.currentAction || '').toLowerCase();
-        if (stageId === 'functional' && action.includes('functional')) return 'active';
-        if (stageId === 'accessibility' && action.includes('axe')) return 'active';
-        if (stageId === 'geometry' && (action.includes('visual') || action.includes('layout'))) return 'active';
-        return 'active';
-      }
-      return 'done';
-    }
-
-    if (stageId === 'ai') {
-      if (st === 'ANALYZING') return 'active';
-      if (st === 'REPORTING' || st === 'COMPLETED' || st === 'REVIEW') return 'done';
-      return 'pending';
-    }
-
-    if (stageId === 'reporting') {
-      if (st === 'REPORTING') return 'active';
-      if (st === 'COMPLETED') return 'done';
-      return 'pending';
-    }
-
-    return 'pending';
-  };
-
-  const isAiPhase = (s?.currentAction || '').toLowerCase().includes('ai analysis');
+  const mm = Math.floor(elapsed / 60);
+  const ss = elapsed % 60;
+  const c = s?.counts;
+  const st = status.toUpperCase();
+  const phase = st === 'DISCOVERING' || st === 'AUTHENTICATING' || st === 'CREATED' ? 'Finding pages' : st === 'ANALYZING' ? 'Explaining findings' : st === 'REPORTING' || st === 'REVIEW' ? 'Writing the report' : 'Testing elements';
+  const results = events.filter((e) => e.type === 'result').slice(-40).reverse();
 
   return (
     <div className="progress-panel">
@@ -99,96 +50,50 @@ export function RunProgress({ runId, snapshot, status, url, startTime, onStop }:
         <div className="progress-title-group">
           <div className="live-indicator-wrapper">
             <span className="live-pulse" />
-            <span className="live-text">{isAiPhase ? 'AI SYNTHESIS IN PROGRESS' : 'TEST IN PROGRESS'}</span>
+            <span className="live-text">{stopping ? 'STOPPING' : 'RUNNING'}</span>
           </div>
-          <h2 className="progress-target-url">
-            {url}
-            <a href={url} target="_blank" rel="noreferrer" className="external-link" title="Open target app in new window">
-              <IconExternalLink style={{ width: 14, height: 14 }} />
-            </a>
-          </h2>
+          <h2 className="progress-target-url">{url}</h2>
         </div>
-
         <div className="progress-meta-actions">
           <div className="elapsed-badge">
-            <span className="elapsed-label">Elapsed Time:</span>
-            <span className="elapsed-time">{formatElapsed(elapsed)}</span>
+            <span className="elapsed-label">Elapsed:</span>
+            <span className="elapsed-time">{mm}:{ss < 10 ? '0' : ''}{ss}</span>
           </div>
           {onStop && (
-            <button type="button" className="btn btn-danger btn-sm" onClick={onStop}>
-              Stop Run
+            <button type="button" className="btn btn-danger btn-sm" onClick={onStop} disabled={stopping}>
+              {stopping ? 'Stopping…' : 'Stop Run'}
             </button>
           )}
         </div>
       </div>
 
-      {/* Primary Animated Progress Bar */}
-      <div className="progress-bar-container">
-        <div className="progress-bar-track">
-          <div
-            className="progress-bar-fill animated-shimmer"
-            style={{ width: `${Math.max(8, pct)}%` }}
-          />
-        </div>
-        <div className="progress-bar-stats">
-          <span className="progress-stat-unit">
-            Progress: <strong>{pct}%</strong> ({s?.unitsDone ?? 0} of {s?.unitsTotal ?? 0} units tested){isAiPhase ? ' · Browser testing complete' : ''}
-          </span>
-          <span className="progress-stat-findings">
-            Discovered: <strong>{s?.pagesDiscovered ?? 0}</strong> pages · <strong>{s?.findings ?? 0}</strong> issues found so far
-          </span>
-        </div>
+      <div className="live-now">
+        <span className="live-now-phase">{phase}</span>
+        {s?.currentPage && <span className="live-now-page">Page: <code>{pathOf(s.currentPage) || '/'}</code></span>}
+        {c && <span className="live-now-page">Pages {c.pagesTested}/{c.pagesCrawled}</span>}
       </div>
 
-      {/* Current Active Activity Banner */}
-      <div className="current-activity-banner">
-        <div className="activity-icon">
-          <IconSparkles style={{ width: 16, height: 16 }} />
-        </div>
-        <div className="activity-details">
-          <div className="activity-label">CURRENT ACTIVE PHASE</div>
-          <div className="activity-text">
-            {s?.currentAction || 'Initializing browser engine & starting crawler...'}
-          </div>
-          {s?.currentPage && (
-            <div className="activity-sub">
-              Target: <code>{s.currentPage}</code> {s.currentViewport && `@ ${s.currentViewport}`}
-            </div>
+      <div className="live-split">
+        <div className="live-log" aria-live="polite">
+          {results.length === 0 ? (
+            <p className="live-log-empty">Element results will appear here as each one is tested.</p>
+          ) : (
+            results.map((e) => {
+              const d = (e.data ?? {}) as { page?: string; element?: string; kind?: string; outcome?: string; actual?: string };
+              return (
+                <div className="live-log-row" key={e.seq}>
+                  <span className={`result-class rc-${d.outcome}`}>{OUTCOME_LABEL[d.outcome ?? ''] ?? d.outcome}</span>
+                  <span className="live-log-what">
+                    <strong>{d.element || d.kind}</strong>
+                    <span className="live-log-detail"> — {d.actual}</span>
+                  </span>
+                  <code className="live-log-page">{pathOf(d.page)}</code>
+                </div>
+              );
+            })
           )}
         </div>
-      </div>
-
-      {/* Live Simulation Sandbox */}
-      <LiveSimulation runId={runId} targetUrl={url} compact={true} currentAction={s?.currentAction ?? undefined} />
-
-      {/* Multi-stage pipeline checklist */}
-      <div className="pipeline-stages">
-        <div className="pipeline-title">Autonomous Execution Pipeline</div>
-        <div className="stages-list">
-          {STAGES.map((stage, idx) => {
-            const state = getStageState(stage.id);
-            return (
-              <div key={stage.id} className={`stage-item stage-${state}`}>
-                <div className="stage-node">
-                  {state === 'done' ? (
-                    <span className="node-done"><IconCheck style={{ width: 12, height: 12 }} /></span>
-                  ) : state === 'active' ? (
-                    <span className="node-active"><span className="node-pulse" /></span>
-                  ) : (
-                    <span className="node-pending">{idx + 1}</span>
-                  )}
-                </div>
-                <div className="stage-info">
-                  <div className="stage-name">
-                    {stage.title}
-                    {state === 'active' && <span className="stage-tag-active">Active</span>}
-                  </div>
-                  <div className="stage-desc">{stage.description}</div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
+        <img className="live-shot" alt="Current browser view" src={`/api/runs/${runId}/live-preview?t=${Math.floor(tick / 2)}`} />
       </div>
     </div>
   );

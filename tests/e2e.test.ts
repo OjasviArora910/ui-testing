@@ -26,7 +26,7 @@ describe('end-to-end against the demo app', () => {
       return JSON.stringify({ analyses: ids.map((id, i) => ({ findingId: id, explanation: 'Mock explanation.', likelyRootCause: 'mock', priority: (i % 5) + 1, confidence: 0.5, likelyFalsePositive: i === 0, correlatedWith: [], suggestedChecks: [] })) });
     });
     platform = createPlatform({
-      configOverrides: { paths: { dataDir: path.join(dir, 'data'), baselineDir: path.join(dir, 'baselines') }, maxPages: 16, maxDepth: 1, maxActions: 400, ai: { maxCalls: 4 } },
+      configOverrides: { paths: { dataDir: path.join(dir, 'data'), baselineDir: path.join(dir, 'baselines') }, maxPages: 20, maxDepth: 1, maxActions: 400, ai: { maxCalls: 4 }, accessibility: { enabled: true }, rules: { disabled: [] } }, // accessibility is opt-in; enabled here so its pipeline stays covered
       provider, trace: false, env: { QA_AUTH_PROFILES: authFile, QA_JWT_DEMO: DEMO_JWT },
     });
     api = await startApi(platform, { host: '127.0.0.1', port: 0 });
@@ -69,7 +69,7 @@ describe('end-to-end against the demo app', () => {
     // false positives: no engine-confirmed defect on /legit
     expect(on('/legit').filter((f) => f.classification === 'defect').map((f) => `${f.ruleId}: ${f.actual}`)).toEqual([]);
     // safety: nothing destructive happened
-    expect(demo.hits).toEqual({ deleteAccount: 0, purchase: 0, subscribe: 0, deleteLink: 0 });
+    expect(demo.hits).toEqual({ deleteAccount: 0, purchase: 0, subscribe: 0, deleteLink: 0, login: 0 });
     // auth profile worked (cookie injected): the account API answered 200 at least once
     expect(demo.requests.some((q) => q.path === '/api/me')).toBe(true);
 
@@ -133,5 +133,5 @@ describe('end-to-end against the demo app', () => {
     expect(await without.text()).toMatch(/never stored/);
     expect((await post(`/api/runs/${runId}/resume`, { auth })).status).toBe(202);
     await platform.orchestrator.whenDone(runId);
-  }, 300_000);
+  }, 600_000); // waits for a complete resumed run over the whole demo app
 });

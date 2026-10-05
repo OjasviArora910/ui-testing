@@ -10,7 +10,7 @@ export const COLLECT_ELEMENTS_SCRIPT = `(mode) => {
   const INPUT_ROLES = { button:'button', submit:'button', reset:'button', checkbox:'checkbox', radio:'radio', range:'slider',
     search:'searchbox', number:'spinbutton', email:'textbox', tel:'textbox', url:'textbox', text:'textbox', password:'textbox' };
   const STYLE_KEYS = ['display','position','visibility','opacity','overflow','overflowX','overflowY','zIndex','color',
-    'backgroundColor','fontSize','fontWeight','textOverflow','whiteSpace','pointerEvents','cursor','webkitLineClamp','clip','clipPath','width','height','flexWrap'];
+    'backgroundColor','fontSize','fontWeight','textOverflow','whiteSpace','pointerEvents','cursor','webkitLineClamp','clip','clipPath','width','height','flexWrap','objectFit'];
   const INTERACTIVE_SEL = 'a[href],button,input:not([type=hidden]),select,textarea,summary,[contenteditable=""],[contenteditable="true"],'
     + '[tabindex]:not([tabindex^="-"]),[role=button],[role=link],[role=tab],[role=menuitem],[role=checkbox],[role=radio],[role=switch],[role=combobox],[role=option]';
   const roleOf = (el) => {

@@ -7,7 +7,7 @@ const ZERO_BOX = { x: 0, y: 0, width: 0, height: 0 };
 function fromInfo(type: ModelElementType, e: ElementInfo, meta?: ModelElement['meta']): ModelElement {
   return {
     type, role: e.role, name: e.name, text: e.text, selector: e.selector, visible: e.visible, enabled: e.enabled,
-    box: e.box, href: e.href ?? undefined, required: e.required, ...(meta ? { meta } : {}),
+    box: e.box, href: e.href ?? undefined, required: e.required, aria: { haspopup: e.aria.haspopup, expanded: e.aria.expanded }, ...(meta ? { meta } : {}),
   };
 }
 
@@ -39,7 +39,7 @@ export async function buildPageModel(controller: BrowserController, opts: { stat
     const e = bySelector.get(selector);
     return {
       type, role: e?.role ?? null, name: name || e?.name || '', text: e?.text ?? '', selector, visible: visibleHint ?? e?.visible ?? false,
-      enabled: e?.enabled ?? true, box: e?.box ?? ZERO_BOX, meta,
+      enabled: e?.enabled ?? true, box: e?.box ?? ZERO_BOX, meta, ...(e ? { aria: { haspopup: e.aria.haspopup, expanded: e.aria.expanded } } : {}),
     };
   };
 
@@ -54,7 +54,7 @@ export async function buildPageModel(controller: BrowserController, opts: { stat
     tabs: structure.tabs.flatMap((t) => t.tabs.map((x) => look(x.selector, 'tab', x.name, { selected: x.selected }))),
     accordions: structure.accordions.map((a) => look(a.selector, 'accordion', a.name, { expanded: a.expanded })),
     tables: structure.tables.map((t) => look(t.selector, 'table', t.caption, { rows: t.rows, headers: t.headers }, t.visible)),
-    images: structure.images.map((i) => look(i.selector, 'image', i.alt ?? '', { src: i.src, alt: i.alt, complete: i.complete, naturalWidth: i.naturalWidth }, i.visible)),
+    images: structure.images.map((i) => look(i.selector, 'image', i.alt ?? '', { src: i.src, alt: i.alt, complete: i.complete, naturalWidth: i.naturalWidth, naturalHeight: i.naturalHeight }, i.visible)),
     interactive: [], counts: {},
   };
 

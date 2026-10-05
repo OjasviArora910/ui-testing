@@ -63,7 +63,7 @@ export function RunForm({
 
     setBusy(true);
     try {
-      const overrides = Object.fromEntries(
+      const overrides: Record<string, unknown> = Object.fromEntries(
         Object.entries(limits)
           .filter(([, v]) => v !== '')
           .map(([k, v]) => [k, Number(v)])
@@ -254,23 +254,6 @@ export function RunForm({
             </div>
           </button>
 
-          <button
-            type="button"
-            className={`choice-card ${mode === 'exploratory' ? 'choice-card-active' : ''} ${!config.aiConfigured ? 'choice-disabled' : ''}`}
-            onClick={() => config.aiConfigured && setMode('exploratory')}
-            disabled={!config.aiConfigured}
-          >
-            <div className="choice-card-radio">
-              {mode === 'exploratory' && <div className="choice-card-radio-dot" />}
-            </div>
-            <div className="choice-card-content">
-              <div className="choice-card-title">
-                Exploratory ReAct Agent
-                <span className="badge badge-purple">Autonomous</span>
-              </div>
-              <div className="choice-card-desc">AI agent explores UI autonomously, tries alternative paths & inspects edge cases</div>
-            </div>
-          </button>
         </div>
       </section>
 

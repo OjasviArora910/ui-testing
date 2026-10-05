@@ -132,6 +132,27 @@ Custom rule example (no code change needed):
 ```
 A plugin is a module listed in `rules.plugins` that default-exports one or more `Rule` objects (see `src/rules/types.ts`).
 
+## What gets tested and what gets reported
+**Everything relevant is tested; only real problems are reported.**
+
+For every reachable page the engine discovers the interactive elements (buttons, links, tabs, accordions, dropdowns, menus, modals, pagination, search, filters, sorting, toggles, carousels, form controls and forms) and actually operates each one with Playwright. Each interaction is verified against what that kind of control is supposed to do: a tab must select its panel, a collapsed control must expand, a dialog trigger must show a dialog, a page control must change the page, a text field must hold what was typed, a link must reach a working page.
+
+- **Works as expected:** no finding. It is counted under *Tested Elements* (dashboard) / *Dynamic test selection* (report), where you can see everything that was exercised.
+- **Demonstrably broken:** a `BUG`, with before/after evidence and the reason it counts as broken.
+- **Real but minor:** a `WARNING`.
+- **Cannot be decided:** `NEEDS_REVIEW` (for example a button whose purpose is unclear and that changes nothing).
+- **Stopped by the safety guard:** `BLOCKED_BY_SAFETY`, neither pass nor bug.
+
+The same failure seen on several elements, pages or viewport sizes is grouped into one problem with its occurrences listed.
+
+Things to know:
+- A form is submitted only when it looks like a login or a real submission form. A search box gets a search test; other fields are operated but never submitted.
+- Validation that correctly rejects empty or invalid input is expected behaviour, not a finding.
+- Overlap is reported only when the page shows content of two unrelated elements drawn on top of each other. Boxes that touch, controls inside a field, and layered UI are not overlap.
+- **Accessibility is out of scope** and off by default (axe-core, keyboard checks, target size). It can be switched on per run under *Accessibility checks*; it is then reported as its own category and never as a UI/UX bug.
+- The limits in `qa.config.json` (`maxPages`, `maxActions`, `functional.max*PerPage`) are safety bounds, set high. If one is reached, what was left untested is listed as not tested.
+- Set `"dynamic": { "enabled": false }` to run the older generic suites instead.
+
 ## Workflow
 1. **Start a run.** Enter a URL. If it needs login, paste the token and choose where it goes. Pick a mode and viewports, then click START TEST. Progress streams live.
 2. **Read the results.** Defects come with a basis and evidence. Anomalies land in the **Review queue**.

@@ -125,4 +125,52 @@ export const MIGRATIONS: string[] = [
     approved_at TEXT NOT NULL
   );
   `,
+  `
+  ALTER TABLE pages ADD COLUMN decision_json TEXT;
+  ALTER TABLE findings ADD COLUMN context_json TEXT;
+  CREATE TABLE test_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    page TEXT NOT NULL,
+    viewport TEXT NOT NULL,
+    scenario TEXT NOT NULL,
+    scenario_label TEXT NOT NULL,
+    page_type TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    confidence TEXT NOT NULL CHECK (confidence IN ('HIGH','MEDIUM','LOW')),
+    kind TEXT NOT NULL,
+    check_name TEXT NOT NULL,
+    target TEXT,
+    expected TEXT NOT NULL,
+    actual TEXT NOT NULL,
+    classification TEXT NOT NULL CHECK (classification IN ('BUG','WARNING','EXPECTED','NEEDS_REVIEW','BLOCKED_BY_SAFETY')),
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX idx_test_results_run ON test_results(run_id);
+  `,
+  `
+  -- classification gains INCONCLUSIVE: rebuild the table without the fixed list
+  CREATE TABLE test_results_v2 (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    page TEXT NOT NULL,
+    viewport TEXT NOT NULL,
+    scenario TEXT NOT NULL,
+    scenario_label TEXT NOT NULL,
+    page_type TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    confidence TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    check_name TEXT NOT NULL,
+    target TEXT,
+    expected TEXT NOT NULL,
+    actual TEXT NOT NULL,
+    classification TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  INSERT INTO test_results_v2 SELECT * FROM test_results;
+  DROP TABLE test_results;
+  ALTER TABLE test_results_v2 RENAME TO test_results;
+  CREATE INDEX idx_test_results_run ON test_results(run_id);
+  `,
 ];

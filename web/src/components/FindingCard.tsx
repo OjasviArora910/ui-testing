@@ -140,7 +140,7 @@ export function FindingCard({
   const files          = allFiles(f.evidence);
 
   const isFunctional = f.category === 'functional' || !!interactionImg;
-  const isA11y       = f.category === 'accessibility' || f.ruleId.startsWith('a11y.');
+  const isA11y       = f.track ? f.track === 'accessibility' : f.category === 'accessibility' || f.ruleId.startsWith('a11y.');
   const semanticRows = getSemanticRows(f.ruleId, f.element, f.actual);
 
   const getSeverityIcon = (sev: string) => {
@@ -163,7 +163,7 @@ export function FindingCard({
   };
 
   return (
-    <article className={`finding-card sev-${f.severity} ${expanded ? 'finding-expanded' : ''}`}>
+    <article className={`finding-card ${isA11y ? 'track-a11y' : `sev-${f.severity}`} ${expanded ? 'finding-expanded' : ''}`}>
       {/* Clickable Header Bar */}
       <div className="finding-header" onClick={() => setExpanded(!expanded)} role="button" tabIndex={0} onKeyDown={(e) => e.key === 'Enter' && setExpanded(!expanded)}>
         <div className="finding-header-left">
@@ -174,6 +174,11 @@ export function FindingCard({
             {getSeverityIcon(f.severity)}
             <span>{f.severity}</span>
           </span>
+          {isA11y ? (
+            <span className="result-class rc-ACCESSIBILITY">Accessibility</span>
+          ) : f.resultClass ? (
+            <span className={`result-class rc-${f.resultClass}`}>{f.resultClass.replace(/_/g, ' ').toLowerCase()}</span>
+          ) : null}
           <span className="category-pill">{f.category}</span>
           <span className="finding-rule-title">{f.ruleId}</span>
         </div>
@@ -216,7 +221,7 @@ export function FindingCard({
           {/* ── Tabs ── */}
           <div className="card-tabs">
             <button type="button" className={`card-tab-btn ${activeTab === 'overview' ? 'card-tab-active' : ''}`} onClick={() => setActiveTab('overview')}>
-              Defect Report
+              {isA11y ? 'Accessibility Report' : 'Finding Report'}
             </button>
             <button type="button" className={`card-tab-btn ${activeTab === 'ai' ? 'card-tab-active' : ''}`} onClick={() => setActiveTab('ai')}>
               <IconSparkles style={{ width: 13, height: 13 }} /> AI Root Cause
@@ -309,6 +314,12 @@ export function FindingCard({
               {/* Meta strip */}
               <div className="meta-strip">
                 <span className="meta-item">Classification: <strong>{f.classification}</strong></span>
+                {f.context?.why && (
+                  <span className="meta-item">Why it is a problem: {f.context.why}</span>
+                )}
+                {f.context?.reason && (
+                  <span className="meta-item">Why tested: <strong>{f.context.pageType}</strong> — {f.context.reason}{f.context.confidence ? ` (${f.context.confidence} confidence)` : ''}</span>
+                )}
                 <span className="meta-item">Ground Truth: <strong>{f.basis || 'Requires Human Decision'}</strong></span>
                 <span className="meta-item">Page: <code>{f.page}</code></span>
               </div>

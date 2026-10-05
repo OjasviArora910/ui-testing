@@ -2,6 +2,7 @@ import type { ConsoleEvent, ElementInfo, NetworkEvent } from '../browser/types.j
 import type { PageModel } from '../discovery/types.js';
 import type { AxeFinding, KeyboardResult } from '../accessibility/types.js';
 import type { FunctionalResult } from '../functional/types.js';
+import type { OverlapProbe } from '../geometry/probe.js';
 import type { QAConfig } from '../shared/config.js';
 import type { Basis, Finding, Severity, Viewport } from '../shared/types.js';
 import type { VisualResult } from '../visual/types.js';
@@ -26,7 +27,11 @@ export interface RuleContext {
   visual: VisualResult | null;
   config: QAConfig;
   /** Live DOM queries for declarative (configured) rules. */
-  queries?: { count(selector: string): Promise<number> };
+  queries?: {
+    count(selector: string): Promise<number>;
+    /** What is actually rendered where two elements' boxes intersect. null = the elements could not be resolved. */
+    overlap?(selectorA: string, selectorB: string): Promise<OverlapProbe | null>;
+  };
 }
 
 /** Plugin contract. Adding a rule = register an object implementing this; the orchestrator never changes. */

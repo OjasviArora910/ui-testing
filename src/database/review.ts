@@ -16,7 +16,11 @@ export function reviewStateOf(classification: Finding['classification'], decisio
   return classification === 'defect' ? 'defect' : 'pending';
 }
 
-export interface VerdictInput { reviewState: ReviewState; severity: Finding['severity'] }
+export interface VerdictInput { reviewState: ReviewState; severity: Finding['severity']; category?: string; ruleId?: string }
+export interface VerdictOptions {
+  /** When false (default) accessibility findings are reported but never decide the verdict. A human-confirmed bug always counts. */
+  accessibilityFailRun?: boolean;
+}
 
 /**
  * Run verdict:
@@ -24,8 +28,10 @@ export interface VerdictInput { reviewState: ReviewState; severity: Finding['sev
  *  BLOCKED_PENDING_REVIEW  - no failing defect, but anomalies still await a human (or are under investigation)
  *  PASS_WITH_WARNINGS      - only minor/info defects remain
  *  PASS                    - nothing active
+ * Accessibility findings take part only when accessibility is a required category (accessibility.failRun).
  */
-export function computeVerdict(findings: VerdictInput[]): Verdict {
+export function computeVerdict(all: VerdictInput[], opts: VerdictOptions = {}): Verdict {
+  const findings = opts.accessibilityFailRun ? all : all.filter((f) => f.reviewState === 'confirmed' || !(f.category === 'accessibility' || f.ruleId?.startsWith('a11y.')));
   const failing = findings.some((f) => f.reviewState === 'confirmed' || (f.reviewState === 'defect' && (f.severity === 'critical' || f.severity === 'major')));
   if (failing) return 'FAILED';
   if (findings.some((f) => f.reviewState === 'pending' || f.reviewState === 'investigating')) return 'BLOCKED_PENDING_REVIEW';

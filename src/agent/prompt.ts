@@ -12,4 +12,4 @@ TOOLS (reply with exactly one JSON object: {"thought": string, "action": {...}})
 {"tool":"hover","element":"e2"} | {"tool":"scroll","direction":"up|down|top|bottom"} | {"tool":"press","key":"Tab"} | {"tool":"screenshot"}
 {"tool":"inspectDOM"} | {"tool":"inspectARIA"} | {"tool":"inspectGeometry","element":"e3"} | {"tool":"inspectNetwork"} | {"tool":"inspectConsole"}
 {"tool":"report","description":"...","element":"e3"} | {"tool":"stop","reason":"..."}
-Use synthetic data only (e.g. qa.tester@example.com). Reply with JSON only, no other text.`;
+Use synthetic data only (e.g. john@maildrop.cc). Reply with JSON only, no other text.`;

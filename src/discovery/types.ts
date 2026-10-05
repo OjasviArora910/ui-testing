@@ -18,6 +18,8 @@ export interface ModelElement {
   box: BoundingBox;
   href?: string;
   required?: boolean;
+  /** State attributes used to infer intent (dialog/menu trigger, expandable). */
+  aria?: { haspopup: boolean; expanded: string | null };
   /** Extra type-specific facts (heading level, image alt, table size, ...). */
   meta?: Record<string, string | number | boolean | null>;
 }

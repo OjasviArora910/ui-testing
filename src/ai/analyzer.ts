@@ -1,7 +1,10 @@
 import type { FindingView } from '../database/types.js';
 import { ANALYSIS_SYSTEM_PROMPT, FIX_PROMPT, sanitizeUntrusted } from './prompt.js';
 import type { AIProvider } from './provider.js';
-import { AIBatchSchema, extractJson, type AIAnalysis } from './schema.js';
+import { AIAnalysisSchema, normalizeAnalysis, parseBatchResponse, type AIAnalysis } from './schema.js';
+
+/** Upper bound of model calls spent on one batch (first call, continuations of cut-off replies, one corrective retry). */
+const MAX_CALLS_PER_BATCH = 4;
 
 /** Compact, already-redacted facts that back a finding (built from stored evidence). */
 export interface EvidenceDigest {
@@ -55,8 +58,9 @@ export function buildUserMessage(batch: FindingView[], digest: AnalyzeOptions['d
 }
 
 /**
- * Runs advisory analysis. Output is strictly validated (AIBatchSchema is .strict()); invalid output is rejected,
- * retried once with the validator error, and then dropped. The result type contains no way to alter a finding.
+ * Runs advisory analysis. Every analysis is strictly validated (AIAnalysisSchema is .strict()); an invalid one is rejected
+ * on its own, the model gets one corrective retry, and a reply cut off by the output limit is continued for the findings it
+ * did not reach. The result type contains no way to alter a finding.
  */
 export async function analyzeFindings(o: AnalyzeOptions): Promise<AnalyzeResult> {
   const result: AnalyzeResult = { accepted: [], rejected: [], callsUsed: 0, injectionSuspected: [], skippedForBudget: [] };
@@ -64,43 +68,56 @@ export async function analyzeFindings(o: AnalyzeOptions): Promise<AnalyzeResult>
   const flags = new Set<string>();
 
   for (let i = 0; i < o.findings.length; i += o.maxFindingsPerCall) {
+    if (o.signal?.aborted) break; // the run was stopped
     const batch = o.findings.slice(i, i + o.maxFindingsPerCall);
     const ids = new Set(batch.map((f) => f.id));
     if (result.callsUsed >= o.maxCalls) { result.skippedForBudget.push(...batch.map((f) => f.id)); continue; }
 
-    const user = buildUserMessage(batch, o.digest, flags);
     const img = o.screenshot ? batch.map((f) => o.screenshot!(f)).filter((x): x is string => !!x).slice(0, 3) : [];
+    const pending = new Map(batch.map((f) => [f.id, f]));
     let history: { role: 'user' | 'assistant'; content: string }[] = [];
-    let accepted: AIAnalysis[] | null = null;
     let lastReason = 'no response';
+    let corrections = 0;
 
-    for (let attempt = 0; attempt < 2 && accepted === null; attempt++) {
+    // Each call must either answer findings or be the single corrective retry; a cut-off reply is continued with the rest.
+    for (let call = 0; pending.size > 0 && call < MAX_CALLS_PER_BATCH; call++) {
       if (result.callsUsed >= o.maxCalls) break;
       result.callsUsed++;
+      const user = buildUserMessage([...pending.values()], o.digest, flags);
       let text: string;
       try {
         text = (await o.provider.complete({ system: ANALYSIS_SYSTEM_PROMPT, user, history, images: img.length ? img : undefined }, o.signal)).text;
       } catch (e) { lastReason = `provider error: ${e instanceof Error ? e.message : String(e)}`; break; }
 
-      const json = extractJson(text);
-      const parsed = AIBatchSchema.safeParse(json);
-      if (!parsed.success) {
-        lastReason = json === undefined ? 'response was not valid JSON' : parsed.error.issues.slice(0, 4).map((x) => `${x.path.join('.') || '(root)'}: ${x.message}`).join('; ');
-        history = [{ role: 'assistant', content: text.slice(0, 2000) }, { role: 'user', content: FIX_PROMPT(lastReason) }];
+      const reply = parseBatchResponse(text);
+      const problems: string[] = [];
+      let answered = 0;
+      for (const raw of reply.items) {
+        // Validated one by one, so a single malformed analysis no longer discards the valid ones beside it.
+        const parsed = AIAnalysisSchema.safeParse(normalizeAnalysis(raw));
+        if (!parsed.success) { problems.push(parsed.error.issues.slice(0, 2).map((x) => `${x.path.join('.') || '(root)'}: ${x.message}`).join('; ')); continue; }
+        const a = parsed.data;
+        if (!pending.has(a.findingId)) { if (!ids.has(a.findingId)) problems.push(`unknown findingId(s): ${a.findingId}`); continue; }
+        result.accepted.push({ ...a, correlatedWith: a.correlatedWith.filter((c) => known.has(c) && c !== a.findingId) });
+        pending.delete(a.findingId); answered++;
+      }
+      if (pending.size === 0) break;
+
+      if (reply.truncated && answered > 0) {
+        // Output limit reached after some complete analyses: ask again for the unanswered findings only.
+        lastReason = 'response was cut off (output limit reached) before these findings were analysed';
+        history = [];
         continue;
       }
-      // Semantic validation: ids must be ones we sent.
-      const bad = parsed.data.analyses.filter((a) => !ids.has(a.findingId));
-      if (bad.length) {
-        lastReason = `unknown findingId(s): ${bad.map((b) => b.findingId).slice(0, 3).join(', ')}`;
-        history = [{ role: 'assistant', content: text.slice(0, 2000) }, { role: 'user', content: FIX_PROMPT(lastReason) }];
-        continue;
-      }
-      accepted = parsed.data.analyses.map((a) => ({ ...a, correlatedWith: a.correlatedWith.filter((c) => known.has(c) && c !== a.findingId) }));
+      lastReason = problems.length ? problems.slice(0, 4).join('; ')
+        : reply.truncated ? 'response was cut off (output limit reached) before any analysis was complete'
+        : !reply.parsed ? 'response was not valid JSON'
+        : 'response did not include an analysis for these findings';
+      if (corrections++ >= 1) break; // one corrective retry, as before
+      history = [{ role: 'assistant', content: text.slice(0, 2000) }, { role: 'user', content: FIX_PROMPT(lastReason) }];
     }
 
-    if (accepted) result.accepted.push(...accepted);
-    else result.rejected.push({ findingIds: [...ids], reason: lastReason });
+    if (pending.size > 0) result.rejected.push({ findingIds: [...pending.keys()], reason: lastReason });
   }
   result.injectionSuspected = [...flags];
   return result;

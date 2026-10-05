@@ -1,6 +1,6 @@
-import type { RunStatus } from '../database/types.js';
+import type { RunCounts, RunStatus } from '../database/types.js';
 
-export type ProgressEventType = 'status' | 'page' | 'action' | 'finding' | 'log' | 'warning' | 'error' | 'done' | 'frame';
+export type ProgressEventType = 'status' | 'page' | 'action' | 'finding' | 'log' | 'warning' | 'error' | 'done' | 'frame' | 'result';
 
 export interface ProgressEvent {
   runId: string;
@@ -25,6 +25,8 @@ export interface ProgressSnapshot {
   findings: number;
   categories: Record<string, number>;
   errors: string[];
+  /** Pages / elements tested / passed / bugs / needs review, kept current while the run is going. */
+  counts?: RunCounts;
 }
 
 export function emptySnapshot(runId: string, status: RunStatus = 'CREATED'): ProgressSnapshot {

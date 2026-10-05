@@ -17,27 +17,55 @@ function candidates(ctx: RuleContext): ElementInfo[] {
 }
 
 // ---------------------------------------------------------------- overlap
+const MAX_OVERLAP_PROBES = 80;
+
+/**
+ * Intersecting bounding boxes are only a CANDIDATE. A finding needs proof that content is really obscured:
+ *  1. the pair is not intentional composition or layering (nested, embedded control, floating UI, stacked layers);
+ *  2. in the live page, the actual content of both (text line boxes, control/media boxes, after ancestor clipping and
+ *     opacity) is rendered at the same place.
+ * Only a material, hit-test-confirmed obstruction is a defect. Anything that cannot be confirmed goes to review, and
+ * boxes that merely touch or intersect without obscuring content are not reported at all.
+ */
 export const overlapRule: Rule = {
   id: 'geometry.overlap', name: 'Overlapping content', category: 'layout', severity: 'major', basis: 'generic_rule',
-  description: 'Two visible text-bearing or interactive elements occupy the same area and neither is layered UI (tooltip, dropdown, modal, popover, badge).',
+  description: 'The content of two unrelated visible elements is rendered on top of each other (verified in the page, not from bounding boxes alone), and neither is layered or composed UI such as a tooltip, dropdown, modal, popover, badge, control inside a field, or stacked slides.',
   async evaluate(ctx) {
     const idx = new ElementIndex(ctx.elements);
     const els = candidates(ctx).filter((e) => (textBearing(e) && !inline(e)) || isInteractive(e));
     const out: Finding[] = [];
+    let probes = 0;
     for (let i = 0; i < els.length && out.length < MAX_PER_RULE; i++) {
       for (let j = i + 1; j < els.length && out.length < MAX_PER_RULE; j++) {
         const a = els[i]!; const b = els[j]!;
-        const ratio = overlapRatio(a.box, b.box);
-        if (ratio < ctx.config.geometry.overlapMinRatio) continue;
+        const boxRatio = overlapRatio(a.box, b.box);
+        if (boxRatio < ctx.config.geometry.overlapMinRatio) continue;
         if (isLegitimateOverlap(a, b, idx)) continue;
         const bothInteractive = isInteractive(a) && isInteractive(b);
-        const strong = bothInteractive ? ratio >= ctx.config.geometry.overlapMinRatio : ratio >= 0.3;
+        const names = `"${(a.name || a.text).slice(0, 40)}" (${fmtBox(a.box)}) and "${(b.name || b.text).slice(0, 40)}" (${fmtBox(b.box)}, ${b.selector})`;
+        const expected = 'The content of unrelated visible elements does not cover each other (layered UI such as tooltips, dropdowns, modals and controls placed inside a field are fine)';
+
+        const probe = ctx.queries?.overlap && probes < MAX_OVERLAP_PROBES ? (probes++, await ctx.queries.overlap(a.selector, b.selector)) : undefined;
+        if (!probe) {
+          // No way to look at the rendered result: box geometry alone never proves a defect.
+          out.push(makeFinding(overlapRule, ctx, {
+            classification: 'anomaly', severity: 'minor', element: elementRef(a), expected,
+            actual: `The boxes of ${names} intersect by ${Math.round(boxRatio * 100)}% of the smaller one; whether content is actually obscured could not be verified`,
+          }));
+          continue;
+        }
+        if (probe.opacityA < 0.05 || probe.opacityB < 0.05) continue; // one of them is not rendered
+        const smaller = Math.min(probe.contentA, probe.contentB);
+        if (smaller <= 0) continue; // clipped away or no content of its own
+        const ratio = probe.covered / smaller;
+        if (ratio < 0.1) continue; // boxes intersect (padding, line spacing, proximity) but no content is obscured
+        const confirmed = probe.verified >= probe.covered * 0.5;
+        const strong = confirmed && (bothInteractive ? ratio >= ctx.config.geometry.overlapMinRatio : ratio >= 0.3);
         out.push(makeFinding(overlapRule, ctx, {
           classification: strong ? 'defect' : 'anomaly',
-          severity: bothInteractive ? 'major' : 'minor',
-          element: elementRef(a),
-          expected: 'Visible elements should not cover each other unless they are layered UI such as a tooltip, dropdown, modal or popover',
-          actual: `"${(a.name || a.text).slice(0, 40)}" (${fmtBox(a.box)}) overlaps "${(b.name || b.text).slice(0, 40)}" (${fmtBox(b.box)}) by ${Math.round(ratio * 100)}% of the smaller element (${b.selector})`,
+          severity: strong && bothInteractive ? 'major' : 'minor',
+          element: elementRef(a), expected,
+          actual: `${names} are rendered on top of each other: ${Math.round(probe.covered)}px² of content is covered, ${Math.round(ratio * 100)}% of the smaller element's content${confirmed ? ' (both confirmed at the same point by hit-testing)' : ' (not confirmed by hit-testing)'}`,
         }));
       }
     }
@@ -161,23 +189,36 @@ export const zeroSizeRule: Rule = {
 };
 
 // ---------------------------------------------------------------- small targets
+/** Controls whose rendered size is decided by the browser or by their text, not by a pointer target the author sized. */
+function sizedByBrowser(e: ElementInfo): boolean {
+  if (e.tag === 'select' || e.tag === 'textarea') return true;
+  return e.tag === 'input' && !['button', 'submit', 'reset', 'image'].includes(e.type ?? 'text');
+}
+
 export const smallTargetRule: Rule = {
-  id: 'geometry.small-target', name: 'Small interactive target', category: 'usability', severity: 'minor', basis: 'generic_rule',
-  description: 'Interactive element smaller than the minimum target size (WCAG 2.2 SC 2.5.8: 24x24 CSS px). Inline text links and native checkboxes/radios are exempt.',
+  id: 'geometry.small-target', name: 'Small interactive target', category: 'accessibility', severity: 'minor', basis: 'generic_rule',
+  description: 'A custom pointer target is clearly smaller than the minimum target size in BOTH dimensions (WCAG 2.2 SC 2.5.8: 24x24 CSS px). Inline text links, native form controls and targets that are small in one dimension only are not defects.',
   async evaluate(ctx) {
+    if (!ctx.config.accessibility.enabled) return []; // target size is an accessibility criterion (WCAG 2.5.8): out of scope unless enabled
     const min = ctx.config.geometry.minTargetSize;
+    const tolerance = 2; // sub-pixel rounding and 1px borders are not a usability problem
+    const idx = new ElementIndex(ctx.elements);
     const out: Finding[] = [];
     for (const e of candidates(ctx)) {
       if (out.length >= MAX_PER_RULE) break;
       if (!isInteractive(e) || isVisuallyHiddenPattern(e)) continue;
       if (e.tag === 'a' && inline(e)) continue; // inline exception
-      if (e.tag === 'input' && ['checkbox', 'radio', 'hidden'].includes(e.type ?? '')) continue; // user-agent controls
-      if (floatingKind(e, new ElementIndex(ctx.elements)) === 'badge') continue;
-      if (e.box.width >= min && e.box.height >= min) continue;
+      if (sizedByBrowser(e)) continue; // user-agent controls (text fields, sliders, checkboxes, selects)
+      if (floatingKind(e, idx) === 'badge') continue;
+      const w = e.box.width; const h = e.box.height;
+      if (w >= min - tolerance && h >= min - tolerance) continue;
+      // Small in one dimension only (a wide text link, a thin bar): reachable, so at most worth a look.
+      const bothSmall = w < min - tolerance && h < min - tolerance;
+      if (!bothSmall && Math.min(w, h) >= min * 0.75) continue;
       out.push(makeFinding(smallTargetRule, ctx, {
-        classification: 'defect', element: elementRef(e),
+        classification: bothSmall ? 'defect' : 'anomaly', element: elementRef(e),
         expected: `Interactive targets are at least ${min}x${min} CSS px`,
-        actual: `"${(e.name || e.text).slice(0, 40)}" is ${Math.round(e.box.width)}x${Math.round(e.box.height)} px`,
+        actual: `"${(e.name || e.text).slice(0, 40)}" is ${Math.round(w)}x${Math.round(h)} px${bothSmall ? '' : ' (small in one dimension only)'}`,
       }));
     }
     return out;

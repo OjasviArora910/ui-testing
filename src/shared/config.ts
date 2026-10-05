@@ -21,26 +21,29 @@ export const CustomRuleSchema = z.object({
 export type CustomRule = z.infer<typeof CustomRuleSchema>;
 
 export const ConfigSchema = z.object({
-  maxPages: z.number().int().positive().default(20),
-  maxActions: z.number().int().positive().default(100),
-  maxDepth: z.number().int().nonnegative().default(3),
+  // Safety bounds, not coverage targets: high enough that a normal site is crawled and exercised completely.
+  // When one is reached, what was left untested is reported as such.
+  maxPages: z.number().int().positive().default(100),
+  maxActions: z.number().int().positive().default(5000),
+  maxDepth: z.number().int().nonnegative().default(10),
   timeouts: z.object({
     navigationMs: z.number().int().positive().default(30000),
     actionMs: z.number().int().positive().default(8000),
-    runMs: z.number().int().positive().default(900000),
-  }).default({ navigationMs: 30000, actionMs: 8000, runMs: 900000 }),
+    runMs: z.number().int().positive().default(3600000),
+  }).default({ navigationMs: 30000, actionMs: 8000, runMs: 3600000 }),
   viewports: z.array(ViewportSchema).min(1).default([
     { name: 'desktop', width: 1440, height: 900 },
     { name: 'tablet', width: 768, height: 1024 },
     { name: 'mobile', width: 390, height: 844 },
   ]),
   rules: z.object({
-    disabled: z.array(z.string()).default([]),
+    /** Off by default: diagnostics about the page's internals (console warnings, request timing, zero-size nodes), not UI/UX problems a user sees. */
+    disabled: z.array(z.string()).default(['console.warning', 'network.slow-request', 'geometry.zero-size']),
     severityOverrides: z.record(z.string(), SeveritySchema).default({}),
     custom: z.array(CustomRuleSchema).default([]),
     /** Paths to JS/TS modules (relative to cwd) that default-export Rule | Rule[]. Lets teams add rules without touching core. */
     plugins: z.array(z.string()).default([]),
-  }).default({ disabled: [], severityOverrides: {}, custom: [], plugins: [] }),
+  }).default({ disabled: ['console.warning', 'network.slow-request', 'geometry.zero-size'], severityOverrides: {}, custom: [], plugins: [] }),
   ignoredEndpoints: z.array(z.string()).default([]),
   dangerousActions: z.object({
     keywords: z.array(z.string()).default(['delete', 'remove account', 'purchase', 'buy now', 'pay', 'checkout', 'confirm payment', 'deactivate', 'close account', 'unsubscribe all', 'destroy', 'wipe', 'reset all']),
@@ -54,13 +57,27 @@ export const ConfigSchema = z.object({
   functional: z.object({
     /** When false (default) form submissions are verified client-side and the network write is blocked. */
     submitValidForms: z.boolean().default(false),
-    maxButtonsPerPage: z.number().int().positive().default(15),
-    maxLinksPerPage: z.number().int().positive().default(15),
-    maxFormsPerPage: z.number().int().positive().default(5),
+    maxButtonsPerPage: z.number().int().positive().default(300),
+    maxLinksPerPage: z.number().int().positive().default(300),
+    maxFormsPerPage: z.number().int().positive().default(30),
+    /** Loose form controls (selects, checkboxes, radios, text fields) exercised per page. */
+    maxFieldsPerPage: z.number().int().positive().default(150),
     allViewports: z.boolean().default(false),
-  }).default({ submitValidForms: false, maxButtonsPerPage: 15, maxLinksPerPage: 15, maxFormsPerPage: 5, allViewports: false }),
-  accessibility: z.object({ enabled: z.boolean().default(true), keyboard: z.boolean().default(true), allViewports: z.boolean().default(false) })
-    .default({ enabled: true, keyboard: true, allViewports: false }),
+  }).default({ submitValidForms: false, maxButtonsPerPage: 300, maxLinksPerPage: 300, maxFormsPerPage: 30, maxFieldsPerPage: 150, allViewports: false }),
+  accessibility: z.object({
+    /** Accessibility (axe-core, keyboard, target size) is out of scope for UI/UX QA and off by default. Opt in to run it as a separate category. */
+    enabled: z.boolean().default(false), keyboard: z.boolean().default(true), allViewports: z.boolean().default(false),
+    /** false (default): accessibility findings are reported in their own category and never decide the run verdict. */
+    failRun: z.boolean().default(false),
+  }).default({ enabled: false, keyboard: true, allViewports: false, failRun: false }),
+  dynamic: z.object({
+    /** Classify each page and run only the tests selected for what was found. false = every generic suite on every page. */
+    enabled: z.boolean().default(true),
+    /** Upper bound for buttons whose purpose could not be inferred (guard-approved only). They are tested like any other control. */
+    maxGenericButtons: z.number().int().nonnegative().default(300),
+    /** Spacing/alignment/duplicate heuristics among similar siblings. Geometry-only hints, never defects: off by default. */
+    consistencyChecks: z.boolean().default(false),
+  }).default({ enabled: true, maxGenericButtons: 300, consistencyChecks: false }),
   network: z.object({ slowRequestMs: z.number().int().positive().default(3000) }).default({ slowRequestMs: 3000 }),
   geometry: z.object({
     minTargetSize: z.number().positive().default(24),

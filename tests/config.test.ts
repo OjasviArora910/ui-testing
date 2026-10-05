@@ -9,7 +9,9 @@ import { directAuthToConfig, RunRequestSchema, toPersisted } from '../src/shared
 describe('config', () => {
   it('shipped qa.config.json validates and equals the schema defaults for core limits', () => {
     const c = loadConfig('qa.config.json');
-    expect(c.maxPages).toBe(20);
+    expect(c.maxPages).toBe(100); // limits are safety bounds, not coverage targets
+    expect(c.accessibility.enabled).toBe(false); // out of scope for normal UI/UX runs
+    expect(c.dynamic.consistencyChecks).toBe(false);
     expect(c.viewports.map((v) => v.name)).toEqual(['desktop', 'tablet', 'mobile']);
     expect(c.dangerousActions.allowMethods).toContain('GET');
   });

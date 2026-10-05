@@ -30,9 +30,11 @@ export const RunRequestSchema = z.object({
   viewports: z.array(ViewportSchema).min(1).optional(),
   /** Per-run overrides of qa.config.json (limits only; the merged config is validated again by ConfigSchema). */
   overrides: z.object({
-    maxPages: z.number().int().positive().max(200).optional(),
-    maxActions: z.number().int().positive().max(2000).optional(),
-    maxDepth: z.number().int().nonnegative().max(10).optional(),
+    maxPages: z.number().int().positive().max(2000).optional(),
+    maxActions: z.number().int().positive().max(100000).optional(),
+    maxDepth: z.number().int().nonnegative().max(50).optional(),
+    accessibility: z.object({ enabled: z.boolean().optional(), failRun: z.boolean().optional() }).strict().optional(),
+    dynamic: z.object({ enabled: z.boolean().optional() }).strict().optional(),
   }).strict().optional(),
 }).strict().refine((r) => !(r.auth && r.authProfile), { message: 'Use either a token (auth) or an authProfile, not both', path: ['auth'] });
 export type RunRequest = z.infer<typeof RunRequestSchema>;

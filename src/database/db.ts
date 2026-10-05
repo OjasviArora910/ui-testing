@@ -5,12 +5,14 @@ import Database from 'better-sqlite3';
 import type { AIAnalysis } from '../ai/schema.js';
 import type { EvidenceRef } from '../evidence/store.js';
 import type { ConsoleEvent, NetworkEvent } from '../browser/types.js';
+import { classifyFinding, problemKey, trackOf } from '../dynamic/resultClassifier.js';
+import type { PageDecision } from '../dynamic/types.js';
 import { fingerprint } from '../rules/helpers.js';
 import type { Redactor } from '../shared/redactor.js';
 import { FindingSchema, type Finding } from '../shared/types.js';
 import { MIGRATIONS } from './schema.js';
 import { reviewStateOf } from './review.js';
-import type { ActionRecord, Decision, DecisionRecord, FindingView, PageRecord, RunRecord, RunState, RunStatus, RunSummary, StoredFinding, Verdict } from './types.js';
+import type { ActionRecord, Decision, DecisionRecord, FindingView, PageRecord, RunRecord, RunState, RunStatus, RunSummary, StoredFinding, TestResultRecord, Verdict } from './types.js';
 
 type Row = Record<string, unknown>;
 const now = (): string => new Date().toISOString();
@@ -97,6 +99,26 @@ export class QADatabase {
     return (this.db.prepare('SELECT * FROM pages WHERE run_id = ? ORDER BY id').all(runId) as Row[]).map((r) => ({
       id: r.id as number, runId: r.run_id as string, url: r.url as string, depth: r.depth as number, statusCode: (r.status_code as number) ?? null,
       title: (r.title as string) ?? null, error: (r.error as string) ?? null, testStatus: r.test_status as PageRecord['testStatus'], model: parse(r.model_json), discoveredAt: r.discovered_at as string,
+      decision: parse<PageDecision>(r.decision_json),
+    }));
+  }
+  setPageDecision(runId: string, url: string, decision: PageDecision): void {
+    this.db.prepare('UPDATE pages SET decision_json = ? WHERE run_id = ? AND url = ?').run(this.j(decision), runId, this.u(url));
+  }
+
+  // ------------------------------------------------------------------ dynamic test results
+  addTestResults(runId: string, rows: Omit<TestResultRecord, 'id' | 'runId' | 'createdAt'>[]): void {
+    const st = this.db.prepare(`INSERT INTO test_results (run_id, page, viewport, scenario, scenario_label, page_type, reason, confidence, kind, check_name, target, expected, actual, classification, created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+    this.db.transaction(() => {
+      for (const r of rows) st.run(runId, this.u(r.page), r.viewport, r.scenario, r.scenarioLabel, r.pageType, this.s(r.reason), r.confidence, r.kind, r.check, this.s(r.target), this.s(r.expected), this.s(r.actual), r.classification, now());
+    })();
+  }
+  listTestResults(runId: string): TestResultRecord[] {
+    return (this.db.prepare('SELECT * FROM test_results WHERE run_id = ? ORDER BY id').all(runId) as Row[]).map((r) => ({
+      id: r.id as number, runId: r.run_id as string, page: r.page as string, viewport: r.viewport as string, scenario: r.scenario as string, scenarioLabel: r.scenario_label as string,
+      pageType: r.page_type as string, reason: r.reason as string, confidence: r.confidence as TestResultRecord['confidence'], kind: r.kind as string, check: r.check_name as string,
+      target: (r.target as string) ?? null, expected: r.expected as string, actual: r.actual as string, classification: r.classification as TestResultRecord['classification'], createdAt: r.created_at as string,
     }));
   }
 
@@ -124,9 +146,9 @@ export class QADatabase {
     const existing = this.db.prepare('SELECT id FROM findings WHERE run_id = ? AND fingerprint = ?').get(runId, fp) as { id: string } | undefined;
     if (existing) return { id: existing.id, inserted: false };
     const id = `fnd_${crypto.randomBytes(6).toString('hex')}`;
-    this.db.prepare(`INSERT INTO findings (id, run_id, fingerprint, rule_id, category, severity, classification, basis, page, viewport, element_json, expected, actual, evidence_json, created_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-      .run(id, runId, fp, f.ruleId, f.category, f.severity, f.classification, f.basis, this.u(f.page), f.viewport, f.element ? this.j(f.element) : null, this.s(f.expected), this.s(f.actual), JSON.stringify(f.evidence), now());
+    this.db.prepare(`INSERT INTO findings (id, run_id, fingerprint, rule_id, category, severity, classification, basis, page, viewport, element_json, expected, actual, evidence_json, context_json, created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(id, runId, fp, f.ruleId, f.category, f.severity, f.classification, f.basis, this.u(f.page), f.viewport, f.element ? this.j(f.element) : null, this.s(f.expected), this.s(f.actual), JSON.stringify(f.evidence), f.context ? this.j(f.context) : null, now());
     return { id, inserted: true };
   }
   addFindingEvidence(findingId: string, ids: string[]): void {
@@ -142,6 +164,7 @@ export class QADatabase {
       severity: r.severity as Finding['severity'], classification: r.classification as Finding['classification'], basis: (r.basis as Finding['basis']) ?? null,
       page: r.page as string, viewport: r.viewport as string, element: parse(r.element_json), expected: r.expected as string, actual: r.actual as string,
       evidence: parse<string[]>(r.evidence_json) ?? [], createdAt: r.created_at as string,
+      ...(r.context_json ? { context: parse<NonNullable<Finding['context']>>(r.context_json)! } : {}),
     };
   }
   getFinding(id: string): StoredFinding | null {
@@ -156,7 +179,8 @@ export class QADatabase {
     return rows.map((r) => {
       const f = this.mapFinding(r);
       const decision = decisions.get(f.id) ?? null;
-      return { ...f, decision, reviewState: reviewStateOf(f.classification, decision) };
+      const reviewState = reviewStateOf(f.classification, decision);
+      return { ...f, decision, reviewState, resultClass: classifyFinding({ ...f, reviewState }), track: trackOf(f), problemKey: problemKey(f) };
     });
   }
   getFindingView(id: string): FindingView | null {

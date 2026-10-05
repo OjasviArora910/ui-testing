@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { EvidenceStore } from '../evidence/store.js';
 import { DecisionSchema, type FindingView } from '../database/types.js';
 import type { Platform } from '../orchestrator/bootstrap.js';
+import { runCounts } from '../reporting/data.js';
 import { DirectAuthSchema, RunRequestSchema } from '../shared/runRequest.js';
 
 const MAX_BODY = 256 * 1024;
@@ -42,6 +43,7 @@ export function createApiServer(platform: Platform, opts: ApiOptions = {}): http
     id: f.id, runId, ruleId: f.ruleId, category: f.category, severity: f.severity, classification: f.classification, basis: f.basis, reviewState: f.reviewState,
     page: f.page, viewport: f.viewport, element: f.element, expected: f.expected, actual: f.actual, decision: f.decision,
     evidence: f.evidence.map((id) => evidence.get(id)).filter(Boolean).map((e) => ({ id: e!.id, kind: e!.kind, label: e!.label, mime: e!.mime, url: `/api/runs/${runId}/evidence/${e!.id}` })),
+    resultClass: f.resultClass, track: f.track, problemKey: f.problemKey, context: f.context ?? null,
     ai: analyses.get(f.id) ?? null,
     aiRejectReason: aiErrors.get(f.id) ?? null,
   });
@@ -54,6 +56,10 @@ export function createApiServer(platform: Platform, opts: ApiOptions = {}): http
       finishedAt: run.finishedAt, error: run.error, abortReason: run.abortReason, summary: run.summary, active: orch.isActive(runId),
       interrupted: !orch.isActive(runId) && !['COMPLETED', 'ABORTED', 'ERROR', 'REVIEW'].includes(run.status),
       progress: orch.snapshot(runId),
+      // one simple state for people: RUNNING until the run ends, then COMPLETED / ABORTED / ERROR
+      state: orch.isActive(runId) ? 'RUNNING' : run.status === 'ABORTED' ? 'ABORTED' : run.status === 'ERROR' ? 'ERROR' : ['COMPLETED', 'REVIEW'].includes(run.status) ? 'COMPLETED' : 'INTERRUPTED',
+      counts: runCounts(db, runId),
+      note: run.status === 'ABORTED' ? `${/user/.test(run.abortReason ?? '') ? 'Stopped by user' : `Stopped (${run.abortReason ?? 'aborted'})`}. Results shown for work completed before stopping.` : run.status === 'ERROR' ? `Run failed: ${run.error ?? 'error'}` : null,
       reports: { html: !!orch.reportPath(runId, 'html'), json: !!orch.reportPath(runId, 'json'), junit: !!orch.reportPath(runId, 'xml') },
     };
   }
@@ -121,11 +127,14 @@ export function createApiServer(platform: Platform, opts: ApiOptions = {}): http
       const desktopVp = platform.config.viewports.filter((v) => v.name === 'desktop');
       return send(res, 200, {
         viewports: desktopVp.length ? desktopVp : [{ name: 'desktop', width: 1440, height: 900 }],
-        modes: ['deterministic', 'ai_assisted', 'exploratory'],
+        // exploratory (AI-driven) runs are not offered: the product is deterministic UI/UX testing, with AI only explaining findings
+        modes: ['deterministic', 'ai_assisted'],
         aiConfigured: !!platform.provider,
         aiProvider: platform.provider ? { name: platform.provider.name, model: platform.provider.model } : null,
         authProfiles: platform.profiles.list(),
         limits: { maxPages: platform.config.maxPages, maxActions: platform.config.maxActions, maxDepth: platform.config.maxDepth },
+        accessibility: { enabled: platform.config.accessibility.enabled, failRun: platform.config.accessibility.failRun },
+        dynamic: platform.config.dynamic.enabled,
       });
     }
     if (p === '/api/runs' && m === 'GET') return send(res, 200, { runs: db.listRuns(50).map((r) => runJson(r.id)) });
@@ -150,7 +159,7 @@ export function createApiServer(platform: Platform, opts: ApiOptions = {}): http
       const runId = rm[1]!; const sub = rm[2] ?? '';
       if (sub === '' && m === 'GET') return send(res, 200, runJson(runId));
       if (sub === 'events' && m === 'GET') return serveSse(req, res, runId);
-      if (sub === 'stop' && m === 'POST') { if (!db.getRun(runId)) throw new HttpError(404, 'Run not found'); return send(res, 200, { stopped: orch.abort(runId) }); }
+      if (sub === 'stop' && m === 'POST') { if (!db.getRun(runId)) throw new HttpError(404, 'Run not found'); return send(res, 200, { stopped: orch.abort(runId) || orch.stopInterrupted(runId) }); }
       if (sub === 'resume' && m === 'POST') {
         const body = ResumeBody.safeParse(await readJson(req));
         if (!body.success) throw new HttpError(400, 'Invalid resume request: expected optional { "auth": { "token", "location", "key"?, "scheme"? } }');
@@ -172,6 +181,16 @@ export function createApiServer(platform: Platform, opts: ApiOptions = {}): http
         const b = BaselineBody.safeParse(await readJson(req));
         if (!b.success) throw new HttpError(400, b.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '));
         try { return send(res, 200, orch.approveBaseline(runId, b.data.page, b.data.viewport, b.data.approvedBy ?? 'reviewer')); } catch (e) { throw new HttpError(404, (e as Error).message); }
+      }
+      if (sub === 'dynamic' && m === 'GET') {
+        const run = db.getRun(runId);
+        if (!run) throw new HttpError(404, 'Run not found');
+        const a11y = (run.config as { accessibility?: { enabled?: boolean; failRun?: boolean } } | null)?.accessibility;
+        return send(res, 200, {
+          pages: db.listPages(runId).filter((pg) => pg.decision).map((pg) => ({ url: pg.url, title: pg.title, decision: pg.decision })),
+          results: db.listTestResults(runId),
+          accessibility: { enabled: a11y?.enabled !== false, failRun: a11y?.failRun === true },
+        });
       }
       if (sub === 'actions' && m === 'GET') return send(res, 200, { actions: db.listActions(runId).slice(-500) });
       if (sub === 'simulation' && m === 'GET') {

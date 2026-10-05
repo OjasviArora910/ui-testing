@@ -1,5 +1,6 @@
 import { accessibilityRules } from '../accessibility/rules.js';
 import { functionalRules } from '../functional/rules.js';
+import { consistencyRules } from '../geometry/consistency.js';
 import { geometryRules } from '../geometry/rules.js';
 import { responsiveRules } from '../geometry/responsive.js';
 import { networkRules } from '../network/rules.js';
@@ -13,7 +14,7 @@ export * from './helpers.js';
 export * from './registry.js';
 export * from './configured.js';
 
-export const builtinRules = [...geometryRules, ...responsiveRules, ...networkRules, ...functionalRules, ...accessibilityRules, ...visualRules];
+export const builtinRules = [...geometryRules, ...consistencyRules, ...responsiveRules, ...networkRules, ...functionalRules, ...accessibilityRules, ...visualRules];
 
 /** Registry with every built-in rule, the declarative rules from config, and any plugin modules listed in config. */
 export async function buildRegistry(config: QAConfig, cwd = process.cwd()): Promise<RuleRegistry> {

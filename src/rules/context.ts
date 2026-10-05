@@ -1,6 +1,7 @@
 import type { BrowserController } from '../browser/index.js';
 import type { ConsoleEvent, NetworkEvent } from '../browser/types.js';
 import { buildPageModel } from '../discovery/pageModel.js';
+import { OVERLAP_PROBE_SCRIPT, type OverlapProbe } from '../geometry/probe.js';
 import type { PageModel } from '../discovery/types.js';
 import type { QAConfig } from '../shared/config.js';
 import type { RuleContext } from './types.js';
@@ -29,6 +30,9 @@ export async function collectRuleContext(controller: BrowserController, init: Co
     text: controller.redactor.redact(text), network: init.network ?? [], console: init.console ?? [],
     functional: init.functional ?? [], axe: init.axe ?? [], keyboard: init.keyboard ?? null, visual: init.visual ?? null,
     config: init.config,
-    queries: { count: (selector) => controller.page.locator(selector).count().catch(() => 0) },
+    queries: {
+      count: (selector) => controller.page.locator(selector).count().catch(() => 0),
+      overlap: (a, b) => (controller.page.evaluate(`${OVERLAP_PROBE_SCRIPT}(${JSON.stringify(a)}, ${JSON.stringify(b)})`) as Promise<OverlapProbe | null>).catch(() => null),
+    },
   };
 }

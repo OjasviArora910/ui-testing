@@ -156,8 +156,12 @@ export async function captureElementCrop(controller: BrowserController, store: E
   } catch { return undefined; }
 }
 
-/** Which page-level evidence is relevant for a finding category. Always includes the screenshot + metadata. */
-export function evidenceFor(finding: Finding, ev: PageEvidence, crop?: EvidenceRef): EvidenceRef[] {
+/**
+ * Evidence for one finding. When the finding has its OWN proof (before/after/trace of the action that produced it), only
+ * that proof, the element highlight and the metadata are attached: page-wide dumps taken after the page was reset would not
+ * show the failure. Otherwise: the page-level evidence relevant to the finding's category, plus screenshot + metadata.
+ */
+export function evidenceFor(finding: Finding, ev: PageEvidence, crop?: EvidenceRef, own: EvidenceRef[] = []): EvidenceRef[] {
   const pick = (...ks: (keyof Omit<PageEvidence, 'all'>)[]): EvidenceRef[] => ks.map((k) => ev[k]).filter((x): x is EvidenceRef => !!x);
   const byCategory: Record<string, (keyof Omit<PageEvidence, 'all'>)[]> = {
     layout: ['geometry', 'dom'], responsive: ['geometry', 'dom'], usability: ['geometry', 'dom'],
@@ -165,6 +169,7 @@ export function evidenceFor(finding: Finding, ev: PageEvidence, crop?: EvidenceR
     functional: ['network', 'console', 'dom'], accessibility: ['dom', 'aria'],
     visual: ['visualCurrent', 'visualBaseline', 'visualDiff'],
   };
+  if (own.length > 0) return [...new Map([...own, ...(crop ? [crop] : []), ...pick('metadata')].map((r) => [r.id, r])).values()];
   const refs = [...(crop ? [crop] : []), ...pick('screenshot'), ...pick(...(byCategory[finding.category] ?? ['dom'])), ...pick('metadata')];
   return [...new Map(refs.map((r) => [r.id, r])).values()];
 }

@@ -9,6 +9,7 @@ const SOFT_404 = /^(404|500|502|503|not found|page not found|internal server err
 export async function testLinks(ctx: FunctionalContext): Promise<FunctionalResult[]> {
   const { controller: c, guard, config } = ctx;
   const results: FunctionalResult[] = [];
+  const push = (r: FunctionalResult): void => { results.push(r); ctx.onResult?.(r); };
   const structure = await c.structure();
   const seen = new Set<string>();
   const origin = ctx.pageUrl;
@@ -30,18 +31,19 @@ export async function testLinks(ctx: FunctionalContext): Promise<FunctionalResul
     const raw = l.href.trim();
 
     if (raw === '' || raw === '#' || /^javascript:/i.test(raw)) {
-      results.push({ ...BASE, check: 'destination', status: 'anomaly', severity: 'minor', basis: null, element: el, expected: 'Links point to a real destination', actual: `Link "${label}" has href="${raw}" (no usable destination)` });
+      if (ctx.plan) continue; // an anchor used as a button: exercised with the other controls, where its effect is observed
+      push({ ...BASE, check: 'destination', status: 'anomaly', severity: 'minor', basis: null, element: el, expected: 'Links point to a real destination', actual: `Link "${label}" has href="${raw}" (no usable destination)` });
       continue;
     }
     const target = normalizeUrl(l.resolved, ctx.pageUrl);
     if (!target || !sameOrigin(target, origin)) {
-      results.push({ ...BASE, check: 'external', status: 'skipped', severity: 'info', basis: null, element: el, expected: 'Same-origin links are followed', actual: `Not followed (external or non-http): ${raw.slice(0, 120)}` });
+      push({ ...BASE, check: 'external', status: 'skipped', severity: 'info', basis: null, element: el, expected: 'Same-origin links are followed', actual: `Not followed (external or non-http): ${raw.slice(0, 120)}` });
       continue;
     }
     if (target === normalizeUrl(ctx.pageUrl, ctx.pageUrl)) continue; // self link
     const decision = guard.check({ kind: 'click', name: label, text: label, href: target, selector: l.selector, role: 'link' });
     if (!decision.allowed) {
-      results.push({ ...BASE, check: 'guard', status: 'skipped', severity: 'info', basis: null, element: el, expected: 'Safe links are followed', actual: `Not followed: ${decision.reason}`, details: { guard: decision } });
+      push({ ...BASE, check: 'guard', status: 'skipped', severity: 'info', basis: null, element: el, expected: 'Safe links are followed', actual: `Not followed: ${decision.reason}`, details: { guard: decision } });
       continue;
     }
     if (!(await resetPage(ctx))) break;
@@ -58,7 +60,7 @@ export async function testLinks(ctx: FunctionalContext): Promise<FunctionalResul
       const covered = /intercepts pointer events/i.test(msg);
       const cover = covered ? await coveredBy(ctx, l.selector) : null;
       const hard = covered && !cover?.floating;
-      results.push({ ...BASE, check: 'clickable', status: hard ? 'fail' : 'anomaly', severity: hard ? 'major' : 'minor', basis: hard ? 'deterministic' : null, element: el, expected: `Link "${label}" can be clicked`, actual: c.redactor.redact(`Not clickable${cover ? `: <${cover.description}> covers it${cover.floating ? ' (floating/overlay UI, needs review)' : ''}` : `: ${msg.slice(0, 200)}`}`) });
+      push({ ...BASE, check: 'clickable', status: hard ? 'fail' : 'anomaly', severity: hard ? 'major' : 'minor', basis: hard ? 'deterministic' : null, element: el, expected: `Link "${label}" can be clicked`, actual: c.redactor.redact(`Not clickable${cover ? `: <${cover.description}> covers it${cover.floating ? ' (floating/overlay UI, needs review)' : ''}` : `: ${msg.slice(0, 200)}`}`) });
       continue;
     }
 
@@ -87,15 +89,15 @@ export async function testLinks(ctx: FunctionalContext): Promise<FunctionalResul
 
     const finalUrl = c.url;
     if (status !== undefined && status >= 400) {
-      results.push({ ...BASE, check: 'navigation', status: 'fail', severity: 'major', basis: 'deterministic', element: el, expected: 'Link leads to a working page (HTTP < 400)', actual: `Link "${label}" -> ${target} returned HTTP ${status}`, details: { status, target }, screenshot: lastBuf });
+      push({ ...BASE, check: 'navigation', status: 'fail', severity: 'major', basis: 'deterministic', element: el, expected: 'Link leads to a working page (HTTP < 400)', actual: `Link "${label}" -> ${target} returned HTTP ${status}`, details: { status, target }, screenshot: lastBuf });
       continue;
     }
     const heading = (await c.page.evaluate("(document.querySelector('h1,h2,title') || {}).textContent || ''") as string).trim();
     if (SOFT_404.test(heading) || SOFT_404.test(await c.page.title())) {
-      results.push({ ...BASE, check: 'soft-error-page', status: 'anomaly', severity: 'minor', basis: null, element: el, expected: 'Link leads to a content page', actual: `Link "${label}" leads to what looks like an error page ("${heading.slice(0, 60)}") although HTTP status was ${status ?? 'unknown'}`, screenshot: lastBuf });
+      push({ ...BASE, check: 'soft-error-page', status: 'anomaly', severity: 'minor', basis: null, element: el, expected: 'Link leads to a content page', actual: `Link "${label}" leads to what looks like an error page ("${heading.slice(0, 60)}") although HTTP status was ${status ?? 'unknown'}`, screenshot: lastBuf });
       continue;
     }
-    results.push({ ...BASE, check: 'navigation', status: 'pass', severity: 'info', basis: null, element: el, expected: 'Link works', actual: `Link "${label}" -> ${finalUrl} (HTTP ${status ?? 'n/a'})` });
+    push({ ...BASE, check: 'navigation', status: 'pass', severity: 'info', basis: null, element: el, expected: 'Link works', actual: `Link "${label}" -> ${finalUrl} (HTTP ${status ?? 'n/a'})` });
   }
   return results;
 }

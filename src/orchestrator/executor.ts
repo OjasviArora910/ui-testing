@@ -9,10 +9,14 @@ import type { QADatabase } from '../database/db.js';
 import type { RunRecord, RunState, RunStatus } from '../database/types.js';
 import { crawl } from '../discovery/crawler.js';
 import { buildPageModel } from '../discovery/pageModel.js';
-import { captureElementCrop, captureHighlightedElementScreenshot, capturePageEvidence, evidenceFor, type EvidenceStore, type PageEvidence } from '../evidence/index.js';
+import type { PageModel } from '../discovery/types.js';
+import { classifyPage, classifyResult, controlKey, selectTests, type TestPlan } from '../dynamic/index.js';
+import { captureHighlightedElementScreenshot, capturePageEvidence, evidenceFor, type EvidenceRef, type EvidenceStore, type PageEvidence } from '../evidence/index.js';
 import {
   ActionBudget,
   ActionGuard,
+  findingFromResult,
+  producesFinding,
   runFunctionalTests,
   type ActionPhase,
   type ConfidenceLevel,
@@ -20,6 +24,7 @@ import {
   type InferredIntent,
   type VerificationVerdict,
 } from '../functional/index.js';
+import { runCounts } from '../reporting/data.js';
 import { generateReports } from '../reporting/index.js';
 import { collectRuleContext } from '../rules/context.js';
 import { buildRegistry, type RuleRegistry } from '../rules/index.js';
@@ -57,6 +62,7 @@ export interface ExecutorHooks {
 class StopRun extends Error { constructor(readonly reason: string) { super(reason); } }
 
 const errMsg = (e: unknown): string => (e instanceof Error ? e.message.split('\n')[0]! : String(e));
+const SEVERITY_ORDER = { critical: 0, major: 1, minor: 2, info: 3 } as const;
 
 /**
  * Executes one run through the lifecycle
@@ -74,6 +80,7 @@ export class RunExecutor {
   private registry!: RuleRegistry;
   private budget!: ActionBudget;
   private testedLinks = new Set<string>();
+  private verifiedControls = new Set<string>();
 
   constructor(private readonly deps: ExecutorDeps, private readonly runId: string, private readonly hooks: ExecutorHooks) { this.db = deps.db; }
 
@@ -87,6 +94,7 @@ export class RunExecutor {
   private save(): void {
     this.state.actionsUsed = this.budget?.used ?? this.state.actionsUsed;
     this.state.testedLinks = [...this.testedLinks];
+    this.state.verifiedControls = [...this.verifiedControls];
     this.db.saveState(this.runId, this.state);
     this.snap.actionsUsed = this.state.actionsUsed;
   }
@@ -98,6 +106,7 @@ export class RunExecutor {
     this.snap.findings = f.length;
     this.snap.categories = {};
     for (const x of f) this.snap.categories[x.category] = (this.snap.categories[x.category] ?? 0) + 1;
+    this.snap.counts = runCounts(this.db, this.runId);
   }
   private action(
     source: string,
@@ -148,6 +157,7 @@ export class RunExecutor {
     this.request = run.request as PersistedRunRequest;
     this.state = run.state ?? { phase: 'CREATED', testedUnits: [], actionsUsed: 0, testedLinks: [] };
     this.testedLinks = new Set(this.state.testedLinks);
+    this.verifiedControls = new Set(this.state.verifiedControls ?? []);
     this.budget = new ActionBudget(this.config.maxActions);
     this.budget.used = this.state.actionsUsed;
     this.snap.actionsUsed = this.budget.used;
@@ -155,6 +165,10 @@ export class RunExecutor {
 
     let outcome: 'completed' | 'aborted' | 'error' = 'completed';
     let reason = '';
+    // Stopping must not wait for the current page, click or 30s navigation to finish: end the tester loops and close the
+    // browser, which makes every pending browser call reject right away. Results gathered so far are kept and reported.
+    const onAbort = (): void => { this.budget.halt(); void this.controller?.close().catch(() => undefined); };
+    if (this.hooks.signal.aborted) onAbort(); else this.hooks.signal.addEventListener('abort', onAbort, { once: true });
     try {
       await this.authenticate();
       await this.discover();
@@ -163,7 +177,10 @@ export class RunExecutor {
       await this.analyze();
       this.setStatus('REVIEW');
     } catch (e) {
-      if (e instanceof StopRun) { outcome = 'aborted'; reason = e.reason; } else { outcome = 'error'; reason = errMsg(e); }
+      if (e instanceof StopRun) { outcome = 'aborted'; reason = e.reason; }
+      // errors raised because the browser was closed by a stop request are part of stopping, not a failed run
+      else if (this.hooks.signal.aborted) { outcome = 'aborted'; reason = String(this.hooks.signal.reason ?? 'stopped by user'); }
+      else { outcome = 'error'; reason = errMsg(e); }
     }
 
     await this.finish(outcome, reason);
@@ -190,6 +207,10 @@ export class RunExecutor {
       this.db.setStatus(this.runId, 'ABORTED', { abortReason: reason });
       this.snap.status = 'ABORTED';
       this.hooks.emit('warning', `Run stopped: ${reason}`);
+    }
+    if (outcome === 'error') {
+      // Still write the summary/verdict and reports, so a failed run shows FAILED with its reason instead of an empty result.
+      try { this.db.saveRulesRun(this.runId, this.registry.enabled(this.config).map((r) => r.id)); generateReports(this.db, this.deps.evidence, this.runId, this.deps.reportsDir); } catch { /* best effort */ }
     }
     if (outcome !== 'error') {
       try {
@@ -231,11 +252,17 @@ export class RunExecutor {
       actionTimeoutMs: this.config.timeouts.actionMs, navigationTimeoutMs: this.config.timeouts.navigationMs,
       blockExternal: true, ...this.deps.launch, trace,
     });
+    this.check(); // a stop requested while the browser was starting
     this.guard = new ActionGuard({ keywords: this.config.dangerousActions.keywords, allowMethods: this.config.dangerousActions.allowMethods, origin: this.request.url });
     this.controller.setRequestGuard(this.guard.asRequestGuard());
 
     const nav = await this.controller.navigate(this.request.url);
-    if (!nav.ok) throw new Error(`Target unreachable: ${nav.error}`);
+    if (!nav.ok) {
+      // A run that could not open its target must read as a failure, never as "nothing found".
+      this.unreachable(this.request.url, first.name, nav.error);
+      throw new Error(`PAGE UNREACHABLE: ${this.request.url} could not be opened (${nav.error}). Nothing was tested.`);
+    }
+    if (nav.partial) this.hooks.emit('warning', `${this.request.url} is usable but did not finish loading within ${Math.round(this.config.timeouts.navigationMs / 1000)}s (a resource is still pending); continuing with the loaded document.`);
     const initBuf = await this.controller.page.screenshot({ type: 'jpeg', quality: 65 }).catch(() => null);
     if (initBuf) {
       this.hooks.setFrame?.({ url: this.request.url, viewport: first.name, action: `loaded ${this.request.url}`, buffer: initBuf });
@@ -247,6 +274,14 @@ export class RunExecutor {
       this.hooks.emit('warning', `Credentials rejected: ${authLabel} got HTTP ${nav.status}. The token may be expired or placed in the wrong location.`);
     }
     this.action('auth', 'navigate', this.request.url, true, `HTTP ${nav.status ?? '?'}`);
+  }
+
+  private unreachable(url: string, viewport: string, error?: string): void {
+    this.insertSimple({
+      ruleId: 'navigation.unreachable', category: 'network', severity: 'critical', classification: 'defect', basis: 'deterministic', page: url, viewport, element: null,
+      expected: 'The page opens and its document becomes usable within the navigation timeout', actual: `PAGE UNREACHABLE: ${error ?? 'navigation failed'}. This page was not tested.`, evidence: [],
+    });
+    this.hooks.emit('warning', `PAGE UNREACHABLE: ${url} (${error ?? 'navigation failed'})`);
   }
 
   private insertSimple(f: Finding): string | null {
@@ -308,12 +343,14 @@ export class RunExecutor {
         this.hooks.emit('page', `testing ${page.url} @ ${vp.name}`);
         try { await this.testUnit(c, page.url, vp, vp === viewports[0], visual); } catch (e) {
           if (e instanceof StopRun) throw e;
+          this.check(); // stopped mid-unit: leave it untested so a resume repeats it
           this.hooks.emit('warning', `Unit ${unit} failed: ${errMsg(e)}`);
           this.action('orchestrator', 'unit-error', unit, false, errMsg(e), page.url, vp.name);
         }
         this.state.testedUnits.push(unit); this.snap.unitsDone++; this.save();
       }
       this.db.setPageTested(this.runId, page.url, 'tested');
+      this.snap.counts = runCounts(this.db, this.runId);
     }
   }
 
@@ -322,8 +359,8 @@ export class RunExecutor {
     await c.setViewport(vp);
     const n0 = c.events.network.length; const k0 = c.events.console.length;
     const nav = await c.navigate(url);
-    this.action('orchestrator', 'navigate', url, nav.ok, nav.error, url, vp.name);
-    if (!nav.ok) return;
+    this.action('orchestrator', 'navigate', url, nav.ok, nav.error ?? (nav.partial ? 'usable, but the page did not finish loading' : undefined), url, vp.name);
+    if (!nav.ok) { this.unreachable(url, vp.name, nav.error); return; }
     const unitBuf = await c.page.screenshot({ type: 'jpeg', quality: 65 }).catch(() => null);
     if (unitBuf) {
       this.hooks.setFrame?.({ url, viewport: vp.name, action: `inspecting ${url}`, buffer: unitBuf });
@@ -333,6 +370,7 @@ export class RunExecutor {
     await c.waitForIdle(cfg.network.slowRequestMs + 1000);
     const network = c.events.network.slice(n0); const consoleEv = c.events.console.slice(k0);
     const model = await buildPageModel(c, { status: nav.status });
+    this.check();
 
     // visual first (before focus changes from the keyboard check could alter the pixels)
     const vis = await visual.check(c, { artifactDir: path.join(this.deps.reportsDir, this.runId, 'visual'), label: `${vp.name}-${path.basename(new URL(url).pathname) || 'root'}` });
@@ -348,11 +386,39 @@ export class RunExecutor {
       if (cfg.accessibility.keyboard) { try { keyboard = await runKeyboardCheck(c, model); } catch (e) { this.hooks.emit('warning', `keyboard check failed: ${errMsg(e)}`); } }
     }
 
-    let functional: FunctionalResult[] = [];
+    // ---- 1. Checks that look at the page as loaded (layout, images, responsive, load-time network/console, visual).
+    // They run BEFORE any interaction and their findings are saved immediately, so stopping later cannot lose them.
+    const ctx = await collectRuleContext(c, { config: cfg, model, network, console: consoleEv, functional: [], axe, keyboard, visual: vis.result });
+    const res = await this.registry.run(ctx, (r) => !r.id.startsWith('functional.'));
+    for (const e of res.errors) this.hooks.emit('warning', `rule ${e.ruleId}: ${e.message}`);
+    let pageEv: PageEvidence | null = null;
+    if (res.findings.length > 0) {
+      pageEv = await capturePageEvidence(c, this.deps.evidence, this.runId, ctx, vis);
+      for (const r of pageEv.all) this.db.addEvidence(r);
+    } else if (vis.result.status === 'NO_BASELINE_AVAILABLE' && vis.currentPng.length > 0) {
+      this.db.addEvidence(this.deps.evidence.saveBinary(this.runId, 'visual-current', vis.currentPng, 'png', { page: url, viewport: vp.name, label: 'current screenshot (no baseline yet)' }));
+    }
+    let crops = 0;
+    // most severe first, so the per-page limit on focused screenshots is spent on what matters
+    for (const f of [...res.findings].sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity])) {
+      let crop;
+      if (pageEv && crops < 50 && f.element) {
+        crop = await captureHighlightedElementScreenshot(c, this.deps.evidence, this.runId, f);
+        if (crop) { this.db.addEvidence(crop); crops++; }
+      }
+      this.insertSimple({ ...f, evidence: pageEv ? evidenceFor(f, pageEv, crop).map((r) => r.id) : [] });
+    }
+    this.save();
+    this.check();
+
+    // ---- 2. Interactions: every element is tested once and its result is saved the moment it finishes.
     if (isFirst || cfg.functional.allViewports) {
-      this.snap.currentAction = 'functional tests';
-      functional = await runFunctionalTests({
-        controller: c, guard: this.guard, pageUrl: url, model, config: cfg, budget: this.budget, testedLinks: this.testedLinks,
+      const plan = cfg.dynamic?.enabled ? this.planFor(url, vp.name, model) : undefined;
+      const needCapture: { id: string; finding: Finding }[] = [];
+      this.snap.currentAction = 'testing elements';
+      const functional = await runFunctionalTests({
+        controller: c, guard: this.guard, pageUrl: url, model, config: cfg, budget: this.budget, testedLinks: this.testedLinks, plan,
+        onResult: (r) => this.recordResult(url, vp, r, needCapture),
         onAction: (a) => {
           if (a.buffer) {
             this.hooks.setFrame?.({ url, viewport: vp.name, action: `${a.phase ? `[${a.phase}] ` : ''}${a.type} ${a.target}`, buffer: a.buffer });
@@ -366,54 +432,97 @@ export class RunExecutor {
             actual: a.actual,
             durationMs: a.durationMs,
           });
-          this.save();
         },
       });
-      await c.settle(150);
+      this.check(); // stopped: everything finished so far is already saved; the page stays "not tested"
+      // A failure that carries no before/after of its own gets a capture of the element now that the page is back as loaded.
+      for (const n of needCapture.slice(0, 30)) {
+        const crop = await captureHighlightedElementScreenshot(c, this.deps.evidence, this.runId, n.finding).catch(() => undefined);
+        if (crop) { this.db.addEvidence(crop); this.db.addFindingEvidence(n.id, [crop.id]); }
+      }
+      if (plan) this.reportUnrun(url, plan, functional);
     }
     for (const g of this.guard.log.splice(0)) if (!g.decision.allowed) this.action('guard', 'blocked', `${g.action.kind} ${g.action.text ?? g.action.name ?? g.action.url ?? g.action.selector ?? ''}`.trim(), false, g.decision.reason, url, vp.name);
-
-    const ctx = await collectRuleContext(c, { config: cfg, model, network, console: consoleEv, functional, axe, keyboard, visual: vis.result });
-    const res = await this.registry.run(ctx);
-    for (const e of res.errors) this.hooks.emit('warning', `rule ${e.ruleId}: ${e.message}`);
-
     this.db.addNetworkEvents(this.runId, url, vp.name, c.events.network.slice(n0));
     this.db.addConsoleEvents(this.runId, url, vp.name, c.events.console.slice(k0));
-
-    let pageEv: PageEvidence | null = null;
-    if (res.findings.length > 0) {
-      pageEv = await capturePageEvidence(c, this.deps.evidence, this.runId, ctx, vis);
-      for (const r of pageEv.all) this.db.addEvidence(r);
-    } else if (vis.result.status === 'NO_BASELINE_AVAILABLE' && vis.currentPng.length > 0) {
-      this.db.addEvidence(this.deps.evidence.saveBinary(this.runId, 'visual-current', vis.currentPng, 'png', { page: url, viewport: vp.name, label: 'current screenshot (no baseline yet)' }));
-    }
-    let crops = 0;
-    for (const f of res.findings) {
-      let crop;
-      if (pageEv && crops < 50 && f.element) {
-        crop = await captureHighlightedElementScreenshot(c, this.deps.evidence, this.runId, f);
-        if (crop) { this.db.addEvidence(crop); crops++; }
-      }
-      let actionEvRef;
-      const fnMatch = ctx.functional.find((r) => r.element?.selector && r.element.selector === f.element?.selector && r.screenshot);
-      if (fnMatch?.screenshot) {
-        actionEvRef = this.deps.evidence.saveBinary(
-          this.runId,
-          'screenshot',
-          fnMatch.screenshot,
-          'png',
-          { page: url, viewport: vp.name, label: 'Error state after interaction' }
-        );
-        this.db.addEvidence(actionEvRef);
-      }
-      const baseEvidence = pageEv ? evidenceFor(f, pageEv, crop).map((r) => r.id) : [];
-      const withEvidence: Finding = {
-        ...f,
-        evidence: actionEvRef ? [actionEvRef.id, ...baseEvidence] : baseEvidence,
-      };
-      this.insertSimple(withEvidence);
-    }
     this.save();
+  }
+
+  /**
+   * One finished element test: stored at once (tested-element record, and a finding with its evidence when it failed or is
+   * ambiguous), counted, and announced. A test cut short by a stop request is NOT a result and is dropped.
+   */
+  private recordResult(url: string, vp: Viewport, r: FunctionalResult, needCapture: { id: string; finding: Finding }[]): void {
+    if (this.hooks.signal.aborted) return;
+    const classification = classifyResult(r);
+    if (!classification) return;
+    const scenario = r.scenario ?? { id: r.kind, label: `${r.kind} test`, pageType: 'UNKNOWN_GENERAL' as const, reason: 'generic suite', confidence: 'MEDIUM' as const };
+    const name = r.element?.name || r.element?.selector || null;
+    this.db.addTestResults(this.runId, [{
+      page: url, viewport: vp.name, scenario: scenario.id, scenarioLabel: scenario.label, pageType: scenario.pageType, reason: scenario.reason,
+      confidence: r.confidence ?? scenario.confidence, kind: r.kind, check: r.check, target: name, expected: r.expected, actual: r.actual, classification,
+    }]);
+    if (r.kind === 'button' && r.status === 'pass' && r.element && r.element.name) this.verifiedControls.add(controlKey(r.element));
+
+    const ruleId = `functional.${r.kind}`;
+    const rule = this.registry.get(ruleId);
+    if (producesFinding(r) && rule && !this.config.rules.disabled.includes(ruleId)) {
+      const base = findingFromResult(rule, { page: url, viewport: vp }, r);
+      const override = this.config.rules.severityOverrides[ruleId];
+      const finding: Finding = override ? { ...base, severity: override } : base;
+      const own = this.saveActionEvidence(r, url, vp.name);
+      const id = this.insertSimple({ ...finding, evidence: own.map((e) => e.id) });
+      if (id && own.length === 0) needCapture.push({ id, finding });
+    }
+    this.snap.currentAction = `${r.kind}: ${name ?? ''}`.slice(0, 120);
+    this.snap.counts = runCounts(this.db, this.runId);
+    this.hooks.emit('result', `${classification} ${name ?? r.kind}`, { page: url, viewport: vp.name, kind: r.kind, element: name, check: r.check, outcome: classification, actual: r.actual.slice(0, 200) });
+    this.save();
+  }
+
+  /** Detection -> selection for one page. The decision is persisted and streamed so the report and dashboard can show it. */
+  private planFor(url: string, viewport: string, model: PageModel): TestPlan {
+    const profile = classifyPage(model);
+    const plan = selectTests(profile, model, this.config, { verified: this.verifiedControls });
+    const planned = plan.buttons.length + plan.forms.length + plan.searches.length + plan.modals.length + plan.fields.length;
+    const decision = { types: profile.types, selected: plan.selected, skipped: plan.skipped, planned };
+    this.db.setPageDecision(this.runId, url, decision);
+    const detected = profile.types.filter((t) => t.confidence !== 'LOW').map((t) => t.type).join(' + ');
+    this.hooks.emit('page', `detected ${detected} on ${url}`, { decision, viewport });
+    this.hooks.emit('log', `${url}: detected ${detected}; selected ${[...new Set(plan.selected.map((x) => x.label))].join(', ')}; skipped ${[...new Set(plan.skipped.map((x) => `${x.label} (${x.reason})`))].join(', ') || 'nothing'}`);
+    return plan;
+  }
+
+  /** A selected test that never ran because the action budget ran out must not look as if it ran: it is moved to `skipped` with that reason. */
+  private reportUnrun(url: string, plan: TestPlan, results: FunctionalResult[]): void {
+    if (!this.budget.exhausted) return;
+    const ran = new Set(results.map((r) => r.scenario?.id));
+    const interactive = new Set([plan.links, ...plan.buttons.map((b) => b.scenario), ...plan.forms.map((f) => f.scenario), ...plan.searches.map((x) => x.scenario), ...plan.modals.map((m) => m.scenario), ...plan.fields.map((f) => f.scenario)].filter((x) => !!x).map((x) => x!.id));
+    const unrun = plan.selected.filter((x) => interactive.has(x.id) && !ran.has(x.id));
+    if (unrun.length === 0) return;
+    const reason = `not run: the action budget (maxActions=${this.budget.max}) was used up`;
+    const profile = this.db.listPages(this.runId).find((p) => p.url === url)?.decision;
+    this.db.setPageDecision(this.runId, url, {
+      types: profile?.types ?? [], planned: profile?.planned, selected: plan.selected.filter((x) => !unrun.includes(x)),
+      skipped: [...plan.skipped, ...[...new Map(unrun.map((x) => [x.id, x])).values()].map((x) => ({ id: x.id, label: x.label, reason }))],
+    });
+    this.hooks.emit('warning', `${url}: ${[...new Set(unrun.map((x) => x.label))].join(', ')} ${reason}. Raise maxActions to cover every page.`);
+  }
+
+  /** BEFORE -> ACTION -> AFTER for one functional result. */
+  private saveActionEvidence(r: FunctionalResult, url: string, viewport: string): EvidenceRef[] {
+    const { evidence } = this.deps;
+    const meta = { page: url, viewport };
+    const what = r.trace?.action ?? `${r.kind} ${r.check}`;
+    const refs: EvidenceRef[] = [];
+    // identical frames (e.g. a request failed with no visible change) are stored once and labelled as such
+    const same = !!r.before && !!r.screenshot && r.before.equals(r.screenshot);
+    if (same) refs.push(evidence.saveBinary(this.runId, 'screenshot', r.screenshot!, 'png', { ...meta, label: `Before and after (no visible change): ${what}` }));
+    if (r.before && !same) refs.push(evidence.saveBinary(this.runId, 'screenshot', r.before, 'png', { ...meta, label: `Before: ${what}` }));
+    if (r.screenshot && !same) refs.push(evidence.saveBinary(this.runId, 'screenshot', r.screenshot, 'png', { ...meta, label: `After / error state: ${what}` }));
+    if (r.trace) refs.push(evidence.saveJson(this.runId, 'action-trace', { check: r.check, expected: r.expected, actual: r.actual, ...r.trace }, { ...meta, label: `Action trace: ${what}` }));
+    for (const ref of refs) this.db.addEvidence(ref);
+    return refs;
   }
 
   // ------------------------------------------------------------------ 4. exploratory agent

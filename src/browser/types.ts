@@ -70,6 +70,8 @@ export interface ActionResult {
   error?: string;
   /** HTTP status of the main document for navigate/reload/back/forward. */
   status?: number;
+  /** Navigation only: the document is usable but the page never finished loading (some resource is still pending). */
+  partial?: boolean;
   durationMs: number;
   urlBefore: string;
   urlAfter: string;
@@ -102,4 +104,4 @@ export interface RawStructure {
 export type StyleKey =
   | 'display' | 'position' | 'visibility' | 'opacity' | 'overflow' | 'overflowX' | 'overflowY' | 'zIndex' | 'color'
   | 'backgroundColor' | 'fontSize' | 'fontWeight' | 'textOverflow' | 'whiteSpace' | 'pointerEvents' | 'cursor'
-  | 'webkitLineClamp' | 'clip' | 'clipPath' | 'width' | 'height' | 'flexWrap';
+  | 'webkitLineClamp' | 'clip' | 'clipPath' | 'width' | 'height' | 'flexWrap' | 'objectFit';
