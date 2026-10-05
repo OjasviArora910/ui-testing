@@ -46,8 +46,9 @@ export function runCounts(db: QADatabase, runId: string): RunCounts {
   const testable = pages.filter((p) => p.model && (p.statusCode ?? 200) < 400);
   let notTestedElements = 0;
   for (const p of testable) {
-    if (p.decision?.planned === undefined) continue;
-    const done = new Set(results.filter((r) => r.page === p.url && r.scenario !== 'links').map((r) => `${r.kind}|${r.scenario}|${r.target ?? ''}`)).size;
+    // only a page that was started and not finished has elements left over; a finished page has none
+    if (p.testStatus === 'tested' || p.decision?.planned === undefined) continue;
+    const done = results.filter((r) => r.page === p.url && r.scenario !== 'links').length;
     notTestedElements += Math.max(0, p.decision.planned - done);
   }
   return {
