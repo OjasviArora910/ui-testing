@@ -487,9 +487,23 @@ a:hover {
    Left Sidebar: Config & History
    ========================================================================== */
 .workspace-sidebar {
+  --navbar-h: 63px;
   display: flex;
   flex-direction: column;
   gap: 16px;
+  position: sticky;
+  top: calc(var(--navbar-h) + 20px);
+  max-height: calc(100vh - var(--navbar-h) - 40px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+@media (max-width: 1100px) {
+  .workspace-sidebar {
+    position: static;
+    max-height: none;
+    overflow: visible;
+  }
 }
 
 .sidebar-tab-switcher {
