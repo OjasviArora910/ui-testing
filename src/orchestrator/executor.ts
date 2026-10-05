@@ -9,8 +9,17 @@ import type { QADatabase } from '../database/db.js';
 import type { RunRecord, RunState, RunStatus } from '../database/types.js';
 import { crawl } from '../discovery/crawler.js';
 import { buildPageModel } from '../discovery/pageModel.js';
-import { captureElementCrop, capturePageEvidence, evidenceFor, type EvidenceStore, type PageEvidence } from '../evidence/index.js';
-import { ActionBudget, ActionGuard, runFunctionalTests, type FunctionalResult } from '../functional/index.js';
+import { captureElementCrop, captureHighlightedElementScreenshot, capturePageEvidence, evidenceFor, type EvidenceStore, type PageEvidence } from '../evidence/index.js';
+import {
+  ActionBudget,
+  ActionGuard,
+  runFunctionalTests,
+  type ActionPhase,
+  type ConfidenceLevel,
+  type FunctionalResult,
+  type InferredIntent,
+  type VerificationVerdict,
+} from '../functional/index.js';
 import { generateReports } from '../reporting/index.js';
 import { collectRuleContext } from '../rules/context.js';
 import { buildRegistry, type RuleRegistry } from '../rules/index.js';
@@ -18,7 +27,7 @@ import type { AuthProfileResolver } from '../shared/authProfiles.js';
 import type { QAConfig } from '../shared/config.js';
 import type { Redactor } from '../shared/redactor.js';
 import type { PersistedRunRequest } from '../shared/runRequest.js';
-import type { AuthConfig, Finding, Viewport } from '../shared/types.js';
+import type { AuthConfig, BoundingBox, Finding, Viewport } from '../shared/types.js';
 import { BaselineStore, VisualTester } from '../visual/index.js';
 import type { ProgressEventType, ProgressSnapshot } from './progress.js';
 
@@ -39,6 +48,7 @@ export interface ExecutorDeps {
 export interface ExecutorHooks {
   signal: AbortSignal;
   emit(type: ProgressEventType, message: string, data?: Record<string, unknown>): void;
+  setFrame?(frame: { url: string; viewport: string; action: string; buffer?: Buffer }): void;
   snapshot: ProgressSnapshot;
   /** One-time token given with the URL. In memory only; never part of persisted run data. */
   auth?: AuthConfig;
@@ -89,10 +99,44 @@ export class RunExecutor {
     this.snap.categories = {};
     for (const x of f) this.snap.categories[x.category] = (this.snap.categories[x.category] ?? 0) + 1;
   }
-  private action(source: string, type: string, target: string, ok: boolean, detail?: string, page?: string, viewport?: string): void {
+  private action(
+    source: string,
+    type: string,
+    target: string,
+    ok: boolean,
+    detail?: string,
+    page?: string,
+    viewport?: string,
+    box?: (BoundingBox & { vpWidth?: number; vpHeight?: number }) | null,
+    meta?: {
+      phase?: ActionPhase;
+      intent?: InferredIntent;
+      verdict?: VerificationVerdict;
+      confidence?: ConfidenceLevel;
+      expected?: string;
+      actual?: string;
+      durationMs?: number;
+    },
+  ): void {
     this.db.addAction(this.runId, { pageUrl: page, viewport, source, type, target, ok, detail });
-    this.snap.currentAction = `${type} ${target}`.slice(0, 120);
-    this.hooks.emit('action', `${type} ${target}`, { ok, source });
+    const phasePrefix = meta?.phase ? `[${meta.phase}] ` : '';
+    this.snap.currentAction = `${phasePrefix}${type} ${target}`.slice(0, 120);
+    this.hooks.emit('action', `${phasePrefix}${type} ${target}`, {
+      ok,
+      source,
+      page,
+      viewport,
+      target,
+      detail,
+      box,
+      phase: meta?.phase,
+      intent: meta?.intent,
+      verdict: meta?.verdict,
+      confidence: meta?.confidence,
+      expected: meta?.expected,
+      actual: meta?.actual,
+      durationMs: meta?.durationMs,
+    });
   }
 
   // ------------------------------------------------------------------ main
@@ -192,6 +236,11 @@ export class RunExecutor {
 
     const nav = await this.controller.navigate(this.request.url);
     if (!nav.ok) throw new Error(`Target unreachable: ${nav.error}`);
+    const initBuf = await this.controller.page.screenshot({ type: 'jpeg', quality: 65 }).catch(() => null);
+    if (initBuf) {
+      this.hooks.setFrame?.({ url: this.request.url, viewport: first.name, action: `loaded ${this.request.url}`, buffer: initBuf });
+      this.hooks.emit('frame', `frame @ ${this.request.url} [${first.name}]`, { url: this.request.url, viewport: first.name });
+    }
     if (auth && (nav.status === 401 || nav.status === 403)) {
       this.insertSimple({ ruleId: 'auth.rejected', category: 'auth', severity: 'major', classification: 'anomaly', basis: null, page: this.request.url, viewport: first.name, element: null,
         expected: 'The supplied credentials are accepted by the target', actual: `Target returned HTTP ${nav.status} for the first request using ${authLabel}`, evidence: [] });
@@ -216,11 +265,16 @@ export class RunExecutor {
         startUrl: this.request.url, maxPages: this.config.maxPages, maxDepth: this.config.maxDepth, initial: this.state.crawl,
         allowLink: (l) => this.guard.check({ kind: 'navigate', url: l.href, text: l.text, selector: l.selector }).allowed,
         shouldStop: () => this.hooks.signal.aborted,
-        onPage: (p, st) => {
+        onPage: async (p, st) => {
           this.db.upsertPage(this.runId, { url: p.url, depth: p.depth, statusCode: p.status ?? null, title: p.model?.title ?? null, error: p.error ?? null, model: p.model ?? undefined, testStatus: p.model ? 'pending' : 'skipped' });
           this.state.crawl = st; this.save();
           this.snap.currentPage = p.url; this.snap.pagesDiscovered = st.visited.length;
           this.hooks.emit('page', `discovered ${p.url}`, { status: p.status, depth: p.depth });
+          const crawlBuf = await c.page.screenshot({ type: 'jpeg', quality: 65 }).catch(() => null);
+          if (crawlBuf) {
+            this.hooks.setFrame?.({ url: p.url, viewport: this.config.viewports[0]?.name || 'desktop', action: `crawling ${p.url}`, buffer: crawlBuf });
+            this.hooks.emit('frame', `frame @ ${p.url}`, { url: p.url, viewport: this.config.viewports[0]?.name || 'desktop' });
+          }
           this.action('crawler', 'visit', p.url, !p.error, p.error, p.url);
           if (p.depth === 0 && (p.status ?? 0) >= 400) {
             this.insertSimple({ ruleId: 'navigation.http-error', category: 'network', severity: 'major', classification: 'defect', basis: 'deterministic', page: p.url, viewport: this.config.viewports[0]!.name, element: null,
@@ -270,6 +324,11 @@ export class RunExecutor {
     const nav = await c.navigate(url);
     this.action('orchestrator', 'navigate', url, nav.ok, nav.error, url, vp.name);
     if (!nav.ok) return;
+    const unitBuf = await c.page.screenshot({ type: 'jpeg', quality: 65 }).catch(() => null);
+    if (unitBuf) {
+      this.hooks.setFrame?.({ url, viewport: vp.name, action: `inspecting ${url}`, buffer: unitBuf });
+      this.hooks.emit('frame', `frame @ ${url} [${vp.name}]`, { url, viewport: vp.name });
+    }
     // Let page-load requests finish (bounded) so slow and failing APIs are observed with their real duration/status.
     await c.waitForIdle(cfg.network.slowRequestMs + 1000);
     const network = c.events.network.slice(n0); const consoleEv = c.events.console.slice(k0);
@@ -278,6 +337,10 @@ export class RunExecutor {
     // visual first (before focus changes from the keyboard check could alter the pixels)
     const vis = await visual.check(c, { artifactDir: path.join(this.deps.reportsDir, this.runId, 'visual'), label: `${vp.name}-${path.basename(new URL(url).pathname) || 'root'}` });
     this.action('visual', vis.result.status, url, vis.result.status !== 'SKIPPED', vis.result.reason, url, vp.name);
+    if (vis.currentPng && vis.currentPng.length > 0) {
+      this.hooks.setFrame?.({ url, viewport: vp.name, action: `inspected ${url}`, buffer: vis.currentPng });
+      this.hooks.emit('frame', `frame @ ${url} [${vp.name}]`, { url, viewport: vp.name });
+    }
 
     let axe: Awaited<ReturnType<typeof runAxe>> = []; let keyboard = null;
     if (cfg.accessibility.enabled && (isFirst || cfg.accessibility.allViewports)) {
@@ -290,7 +353,21 @@ export class RunExecutor {
       this.snap.currentAction = 'functional tests';
       functional = await runFunctionalTests({
         controller: c, guard: this.guard, pageUrl: url, model, config: cfg, budget: this.budget, testedLinks: this.testedLinks,
-        onAction: (a) => { this.action('functional', a.type, a.target, a.ok, a.detail, url, vp.name); this.save(); },
+        onAction: (a) => {
+          if (a.buffer) {
+            this.hooks.setFrame?.({ url, viewport: vp.name, action: `${a.phase ? `[${a.phase}] ` : ''}${a.type} ${a.target}`, buffer: a.buffer });
+          }
+          this.action('functional', a.type, a.target, a.ok, a.detail, url, vp.name, a.box, {
+            phase: a.phase,
+            intent: a.intent,
+            verdict: a.verdict,
+            confidence: a.confidence,
+            expected: a.expected,
+            actual: a.actual,
+            durationMs: a.durationMs,
+          });
+          this.save();
+        },
       });
       await c.settle(150);
     }
@@ -313,11 +390,27 @@ export class RunExecutor {
     let crops = 0;
     for (const f of res.findings) {
       let crop;
-      if (pageEv && crops < 12 && f.element) {
-        crop = await captureElementCrop(c, this.deps.evidence, this.runId, f);
+      if (pageEv && crops < 50 && f.element) {
+        crop = await captureHighlightedElementScreenshot(c, this.deps.evidence, this.runId, f);
         if (crop) { this.db.addEvidence(crop); crops++; }
       }
-      const withEvidence: Finding = { ...f, evidence: pageEv ? evidenceFor(f, pageEv, crop).map((r) => r.id) : [] };
+      let actionEvRef;
+      const fnMatch = ctx.functional.find((r) => r.element?.selector && r.element.selector === f.element?.selector && r.screenshot);
+      if (fnMatch?.screenshot) {
+        actionEvRef = this.deps.evidence.saveBinary(
+          this.runId,
+          'screenshot',
+          fnMatch.screenshot,
+          'png',
+          { page: url, viewport: vp.name, label: 'Error state after interaction' }
+        );
+        this.db.addEvidence(actionEvRef);
+      }
+      const baseEvidence = pageEv ? evidenceFor(f, pageEv, crop).map((r) => r.id) : [];
+      const withEvidence: Finding = {
+        ...f,
+        evidence: actionEvRef ? [actionEvRef.id, ...baseEvidence] : baseEvidence,
+      };
       this.insertSimple(withEvidence);
     }
     this.save();

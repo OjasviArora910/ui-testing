@@ -20,6 +20,7 @@ interface SubmitObservation {
   failedRequests: string[];
   errorPage: number | null;
   domChanged: boolean;
+  screenshot?: Buffer;
 }
 
 async function fillField(c: BrowserController, f: RawField, value: string): Promise<boolean> {
@@ -36,8 +37,12 @@ async function fillForm(ctx: FunctionalContext, form: RawForm, override?: { sele
   for (const f of form.fields) {
     if (!ctx.budget.consume()) return;
     const value = override?.selector === f.selector ? override.value : validValue(f);
+    const loc = ctx.controller.locate({ css: f.selector });
+    const rawBox = await loc.boundingBox().catch(() => null);
+    const box = rawBox ? { ...rawBox, vpWidth: ctx.controller.viewport.width, vpHeight: ctx.controller.viewport.height } : null;
     const ok = await fillField(ctx.controller, f, value);
-    ctx.onAction?.({ type: 'fill', target: f.name || f.selector, ok });
+    const buf = await ctx.controller.page.screenshot({ type: 'jpeg', quality: 65 }).catch(() => undefined);
+    ctx.onAction?.({ type: 'fill', target: f.name || f.selector, ok, box, buffer: buf });
   }
 }
 
@@ -48,9 +53,12 @@ async function submitAndObserve(ctx: FunctionalContext, form: RawForm): Promise<
   const textBefore = await pageText(ctx); const sigBefore = await domSignature(ctx);
   const urlBefore = c.page.url();
   const submitSel = form.submit?.selector;
+  const rawBox = submitSel ? await c.locate({ css: submitSel }).boundingBox().catch(() => null) : null;
+  const box = rawBox ? { ...rawBox, vpWidth: c.viewport.width, vpHeight: c.viewport.height } : null;
   const res = submitSel ? await c.click({ css: submitSel }) : await c.press('Enter', { css: form.fields[0]?.selector ?? form.selector });
   await c.settle(250);
-  ctx.onAction?.({ type: 'submit', target: form.name || form.selector, ok: res.ok, detail: res.error });
+  const buf = await c.page.screenshot({ type: 'jpeg', quality: 65 }).catch(() => undefined);
+  ctx.onAction?.({ type: 'submit', target: form.name || form.selector, ok: res.ok, detail: res.error, box, buffer: buf });
 
   const info = await c.page.evaluate(`((sel) => {
     const f = document.querySelector(sel);
@@ -72,6 +80,7 @@ async function submitAndObserve(ctx: FunctionalContext, form: RawForm): Promise<
     failedRequests: net.filter((n) => !n.ok && !n.ignored && !n.blockedByGuard).map((n) => `${n.method} ${n.url} ${n.status ?? n.failure}`),
     errorPage: doc?.status && doc.status >= 400 ? doc.status : null,
     domChanged: sigBefore !== (await domSignature(ctx)),
+    screenshot: buf,
   };
 }
 
@@ -132,9 +141,10 @@ export async function testForms(ctx: FunctionalContext): Promise<FunctionalResul
           ...BASE, check: 'invalid-input-accepted', status: 'fail', severity: 'major', basis: 'generic_rule', element: fieldEl,
           expected: `Field "${fieldLabel}" (type=${f.type}${f.min ? ` min=${f.min}` : ''}${f.pattern ? ` pattern=${f.pattern}` : ''}) rejects "${bad}" with a validation message`,
           actual: `Form submitted with invalid value "${bad}" in "${fieldLabel}" and showed no validation message${form.noValidate ? ' (form has novalidate)' : ''}`,
+          screenshot: o.screenshot,
         });
       } else {
-        results.push({ ...BASE, check: 'validation-message', status: 'anomaly', severity: 'minor', basis: null, element: fieldEl, expected: 'Invalid input shows a validation message', actual: `Invalid "${bad}" in "${fieldLabel}" produced no request and no visible message` });
+        results.push({ ...BASE, check: 'validation-message', status: 'anomaly', severity: 'minor', basis: null, element: fieldEl, expected: 'Invalid input shows a validation message', actual: `Invalid "${bad}" in "${fieldLabel}" produced no request and no visible message`, screenshot: o.screenshot });
       }
     }
 
@@ -152,11 +162,11 @@ export async function testForms(ctx: FunctionalContext): Promise<FunctionalResul
     if (config.functional.submitValidForms && o.failedRequests.length) problems.push(`failed request: ${o.failedRequests[0]!.slice(0, 150)}`);
     if (o.consoleErrors.length) problems.push(`console error: ${o.consoleErrors[0]!.slice(0, 150)}`);
     if (problems.length) {
-      results.push({ ...BASE, check: 'valid-submission', status: 'fail', severity: 'major', basis: 'deterministic', element: el, expected: 'A valid synthetic submission succeeds without errors', actual: `Valid submission of "${label}" caused ${problems.join('; ')}` });
+      results.push({ ...BASE, check: 'valid-submission', status: 'fail', severity: 'major', basis: 'deterministic', element: el, expected: 'A valid synthetic submission succeeds without errors', actual: `Valid submission of "${label}" caused ${problems.join('; ')}`, screenshot: o.screenshot });
     } else if (o.nativeBlocked) {
-      results.push({ ...BASE, check: 'valid-submission', status: 'anomaly', severity: 'minor', basis: null, element: el, expected: 'Valid synthetic data is accepted', actual: `Form "${label}" rejected synthetic data via validation (${o.validationMessages.slice(0, 2).join(' / ')}); the generated value may not match an undeclared rule` });
+      results.push({ ...BASE, check: 'valid-submission', status: 'anomaly', severity: 'minor', basis: null, element: el, expected: 'Valid synthetic data is accepted', actual: `Form "${label}" rejected synthetic data via validation (${o.validationMessages.slice(0, 2).join(' / ')}); the generated value may not match an undeclared rule`, screenshot: o.screenshot });
     } else if (!o.attempted && !o.domChanged && o.feedbackText.length === 0) {
-      results.push({ ...BASE, check: 'valid-submission', status: 'anomaly', severity: 'minor', basis: null, element: el, expected: 'Submitting a valid form has an observable result', actual: `Submitting "${label}" with valid data produced no request, navigation or visible change` });
+      results.push({ ...BASE, check: 'valid-submission', status: 'anomaly', severity: 'minor', basis: null, element: el, expected: 'Submitting a valid form has an observable result', actual: `Submitting "${label}" with valid data produced no request, navigation or visible change`, screenshot: o.screenshot });
     } else {
       results.push({ ...BASE, check: 'valid-submission', status: 'pass', severity: 'info', basis: null, element: el, expected: 'Valid submission works', actual: `Valid submission attempted${config.functional.submitValidForms ? '' : ' (network write blocked by the safety guard)'}` });
     }

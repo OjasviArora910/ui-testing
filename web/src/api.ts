@@ -31,6 +31,7 @@ export interface Finding {
   reviewState: ReviewState; page: string; viewport: string; element: { selector: string; role?: string; name?: string } | null;
   expected: string; actual: string; decision: { decision: Decision; note: string | null; decidedBy: string; decidedAt: string } | null;
   evidence: { id: string; kind: string; label: string; mime: string; url: string }[]; ai: AIAnalysis | null;
+  aiRejectReason?: string | null;
 }
 
 export interface ProgressEvent { runId: string; seq: number; at: string; type: string; message: string; data?: Record<string, unknown> }
@@ -40,6 +41,21 @@ async function req<T>(url: string, init?: RequestInit): Promise<T> {
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error((body as { error?: string; issues?: { path: string; message: string }[] }).issues?.map((i) => `${i.path}: ${i.message}`).join('; ') || (body as { error?: string }).error || `HTTP ${res.status}`);
   return body as T;
+}
+
+export interface SimulationStep {
+  id: number;
+  url: string;
+  viewport: string;
+  source: string;
+  action: string;
+  target: string;
+  ok: boolean;
+  detail: string | null;
+  at: string;
+  screenshotUrl: string | null;
+  findingsCount: number;
+  findings: Array<{ id: string; ruleId: string; severity: string; actual: string }>;
 }
 
 export const api = {
@@ -53,4 +69,6 @@ export const api = {
   queue: (id: string) => req<{ queue: Finding[] }>(`/api/runs/${id}/review-queue`).then((r) => r.queue),
   decide: (findingId: string, decision: Decision, note?: string) => req<{ verdict: string }>(`/api/findings/${findingId}/decision`, { method: 'POST', body: JSON.stringify({ decision, note: note || undefined }) }),
   approveBaseline: (runId: string, page: string, viewport: string) => req<{ file: string }>(`/api/runs/${runId}/baselines`, { method: 'POST', body: JSON.stringify({ page, viewport }) }),
+  simulation: (runId: string) => req<{ simulation: SimulationStep[] }>(`/api/runs/${runId}/simulation`).then((r) => r.simulation),
 };
+

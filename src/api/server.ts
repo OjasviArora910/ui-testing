@@ -38,11 +38,12 @@ export function createApiServer(platform: Platform, opts: ApiOptions = {}): http
     try { return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch { throw new HttpError(400, 'Invalid JSON'); }
   }
 
-  const findingJson = (runId: string, f: FindingView, analyses: ReturnType<typeof db.analysesByFinding>, evidence: Map<string, ReturnType<typeof db.listEvidence>[number]>) => ({
+  const findingJson = (runId: string, f: FindingView, analyses: ReturnType<typeof db.analysesByFinding>, aiErrors: Map<string, string>, evidence: Map<string, ReturnType<typeof db.listEvidence>[number]>) => ({
     id: f.id, runId, ruleId: f.ruleId, category: f.category, severity: f.severity, classification: f.classification, basis: f.basis, reviewState: f.reviewState,
     page: f.page, viewport: f.viewport, element: f.element, expected: f.expected, actual: f.actual, decision: f.decision,
     evidence: f.evidence.map((id) => evidence.get(id)).filter(Boolean).map((e) => ({ id: e!.id, kind: e!.kind, label: e!.label, mime: e!.mime, url: `/api/runs/${runId}/evidence/${e!.id}` })),
     ai: analyses.get(f.id) ?? null,
+    aiRejectReason: aiErrors.get(f.id) ?? null,
   });
 
   function runJson(runId: string) {
@@ -117,10 +118,14 @@ export function createApiServer(platform: Platform, opts: ApiOptions = {}): http
 
     if (p === '/api/health') return send(res, 200, { ok: true });
     if (p === '/api/config' && m === 'GET') {
+      const desktopVp = platform.config.viewports.filter((v) => v.name === 'desktop');
       return send(res, 200, {
-        viewports: platform.config.viewports, modes: ['deterministic', 'ai_assisted', 'exploratory'], aiConfigured: !!platform.provider,
+        viewports: desktopVp.length ? desktopVp : [{ name: 'desktop', width: 1440, height: 900 }],
+        modes: ['deterministic', 'ai_assisted', 'exploratory'],
+        aiConfigured: !!platform.provider,
         aiProvider: platform.provider ? { name: platform.provider.name, model: platform.provider.model } : null,
-        authProfiles: platform.profiles.list(), limits: { maxPages: platform.config.maxPages, maxActions: platform.config.maxActions, maxDepth: platform.config.maxDepth },
+        authProfiles: platform.profiles.list(),
+        limits: { maxPages: platform.config.maxPages, maxActions: platform.config.maxActions, maxDepth: platform.config.maxDepth },
       });
     }
     if (p === '/api/runs' && m === 'GET') return send(res, 200, { runs: db.listRuns(50).map((r) => runJson(r.id)) });
@@ -132,7 +137,10 @@ export function createApiServer(platform: Platform, opts: ApiOptions = {}): http
       }
       const parsed = RunRequestSchema.safeParse(body);
       if (!parsed.success) return send(res, 400, { error: 'Invalid request', issues: parsed.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })) });
-      try { const run = orch.start(parsed.data); return send(res, 202, { runId: run.id }); } catch (e) {
+      try {
+        const run = orch.start(parsed.data);
+        return send(res, 202, { runId: run.id });
+      } catch (e) {
         throw new HttpError(/already in progress/.test((e as Error).message) ? 409 : 400, platform.redactor.redact((e as Error).message));
       }
     }
@@ -150,15 +158,15 @@ export function createApiServer(platform: Platform, opts: ApiOptions = {}): http
       }
       if (sub === 'findings' && m === 'GET') {
         if (!db.getRun(runId)) throw new HttpError(404, 'Run not found');
-        const ev = new Map(db.listEvidence(runId).map((e) => [e.id, e])); const an = db.analysesByFinding(runId);
+        const ev = new Map(db.listEvidence(runId).map((e) => [e.id, e])); const an = db.analysesByFinding(runId); const errs = db.aiErrorsByFinding(runId);
         const state = url.searchParams.get('state'); const category = url.searchParams.get('category');
         const list = db.listFindings(runId).filter((f) => (!state || f.reviewState === state) && (!category || f.category === category));
-        return send(res, 200, { findings: list.map((f) => findingJson(runId, f, an, ev)) });
+        return send(res, 200, { findings: list.map((f) => findingJson(runId, f, an, errs, ev)) });
       }
       if (sub === 'review-queue' && m === 'GET') {
         if (!db.getRun(runId)) throw new HttpError(404, 'Run not found');
-        const ev = new Map(db.listEvidence(runId).map((e) => [e.id, e])); const an = db.analysesByFinding(runId);
-        return send(res, 200, { queue: orch.reviewQueue(runId).map((f) => findingJson(runId, f, an, ev)) });
+        const ev = new Map(db.listEvidence(runId).map((e) => [e.id, e])); const an = db.analysesByFinding(runId); const errs = db.aiErrorsByFinding(runId);
+        return send(res, 200, { queue: orch.reviewQueue(runId).map((f) => findingJson(runId, f, an, errs, ev)) });
       }
       if (sub === 'baselines' && m === 'POST') {
         const b = BaselineBody.safeParse(await readJson(req));
@@ -166,6 +174,24 @@ export function createApiServer(platform: Platform, opts: ApiOptions = {}): http
         try { return send(res, 200, orch.approveBaseline(runId, b.data.page, b.data.viewport, b.data.approvedBy ?? 'reviewer')); } catch (e) { throw new HttpError(404, (e as Error).message); }
       }
       if (sub === 'actions' && m === 'GET') return send(res, 200, { actions: db.listActions(runId).slice(-500) });
+      if (sub === 'simulation' && m === 'GET') {
+        if (!db.getRun(runId)) throw new HttpError(404, 'Run not found');
+        return send(res, 200, { simulation: orch.buildSimulation(runId) });
+      }
+      if (sub === 'live-preview' && m === 'GET') {
+        const frame = orch.getFrame(runId);
+        if (frame?.buffer) {
+          const contentType = frame.buffer[0] === 0x89 && frame.buffer[1] === 0x50 ? 'image/png' : 'image/jpeg';
+          res.writeHead(200, { 'content-type': contentType, 'cache-control': 'no-cache, no-store, must-revalidate', 'content-length': frame.buffer.length });
+          res.end(frame.buffer);
+          return;
+        }
+        const latestEv = db.listEvidence(runId).reverse().find((e) => e.kind === 'visual-current' || e.kind === 'screenshot');
+        if (latestEv) { serveEvidence(res, runId, latestEv.id); return; }
+        res.writeHead(204, { 'cache-control': 'no-store' });
+        res.end();
+        return;
+      }
       if (sub.startsWith('evidence/') && m === 'GET') return serveEvidence(res, runId, sub.slice('evidence/'.length));
       if (sub === 'report.html' && m === 'GET') return serveReport(res, runId, 'html');
       if (sub === 'report.json' && m === 'GET') return serveReport(res, runId, 'json');

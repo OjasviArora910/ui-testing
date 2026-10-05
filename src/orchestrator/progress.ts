@@ -1,6 +1,6 @@
 import type { RunStatus } from '../database/types.js';
 
-export type ProgressEventType = 'status' | 'page' | 'action' | 'finding' | 'log' | 'warning' | 'error' | 'done';
+export type ProgressEventType = 'status' | 'page' | 'action' | 'finding' | 'log' | 'warning' | 'error' | 'done' | 'frame';
 
 export interface ProgressEvent {
   runId: string;

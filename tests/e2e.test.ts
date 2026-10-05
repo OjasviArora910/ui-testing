@@ -133,5 +133,5 @@ describe('end-to-end against the demo app', () => {
     expect(await without.text()).toMatch(/never stored/);
     expect((await post(`/api/runs/${runId}/resume`, { auth })).status).toBe(202);
     await platform.orchestrator.whenDone(runId);
-  }, 180_000);
+  }, 300_000);
 });

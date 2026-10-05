@@ -16,16 +16,25 @@ export const axeRule: Rule = {
   async evaluate(ctx) {
     const out: Finding[] = [];
     for (const f of ctx.axe) {
+      if (!f.nodes || f.nodes.length === 0) continue;
       const severity = f.impact ? IMPACT[f.impact] : 'minor';
-      for (const n of f.nodes.slice(0, MAX_NODES_PER_RULE)) {
-        out.push(makeFinding(axeRule, ctx, {
-          ruleId: `a11y.${f.axeRuleId}`, severity: f.kind === 'incomplete' ? 'info' : severity,
-          classification: f.kind === 'violation' ? 'defect' : 'anomaly',
-          element: { selector: n.selector, name: n.html.slice(0, 80) },
-          expected: f.help,
-          actual: `${n.summary || f.description}`.slice(0, 400) + ` [${f.tags.filter((t) => /^wcag|^best/.test(t)).slice(0, 3).join(', ')}] ${f.helpUrl}`,
-        }));
-      }
+      const nodes = f.nodes.slice(0, MAX_NODES_PER_RULE);
+      const isButtonName = f.axeRuleId === 'button-name';
+      const emptyPrefix = isButtonName ? 'Accessible name: EMPTY. ' : '';
+      const countPrefix = f.nodes.length > 1 ? `(${f.nodes.length} affected elements: ${nodes.map((n) => n.selector).join(', ')}) ` : '';
+
+      out.push(makeFinding(axeRule, ctx, {
+        ruleId: `a11y.${f.axeRuleId}`,
+        severity: f.kind === 'incomplete' ? 'info' : severity,
+        classification: f.kind === 'violation' ? 'defect' : 'anomaly',
+        element: {
+          selector: nodes.map((n) => n.selector).join(', '),
+          name: isButtonName ? 'Accessible name: EMPTY' : nodes[0]!.html.slice(0, 80),
+        },
+        expected: f.help,
+        actual: `${emptyPrefix}${countPrefix}${nodes[0]!.summary || f.description}`.slice(0, 500) +
+          ` [${f.tags.filter((t) => /^wcag|^best/.test(t)).slice(0, 3).join(', ')}] ${f.helpUrl}`,
+      }));
     }
     return out;
   },

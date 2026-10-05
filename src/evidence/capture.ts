@@ -46,7 +46,106 @@ export async function capturePageEvidence(controller: BrowserController, store: 
   return out;
 }
 
-/** Element crop for one finding (best effort, short timeout). */
+/**
+ * Captures a screenshot of the failing element highlighted with a clear red bounding box and tag in the surrounding UI context.
+ * Scrolls the element into the center of the viewport, applies high-visibility red outline/badge, captures the screenshot,
+ * cleans up the DOM, and returns an EvidenceRef.
+ */
+export async function captureHighlightedElementScreenshot(
+  controller: BrowserController,
+  store: EvidenceStore,
+  runId: string,
+  finding: Finding
+): Promise<EvidenceRef | undefined> {
+  const sel = finding.element?.selector;
+  if (!sel || sel.length > 800) return undefined;
+
+  try {
+    const highlighted = await controller.page.evaluate(
+      (payload: { selector: string; ruleId: string }) => {
+        const selectors = payload.selector.split(',').map((s) => s.trim()).filter(Boolean);
+        const elements: HTMLElement[] = [];
+        for (const s of selectors) {
+          try {
+            const matched = Array.from(document.querySelectorAll<HTMLElement>(s));
+            elements.push(...matched);
+          } catch {
+            // invalid selector syntax fallback
+          }
+        }
+
+        if (elements.length === 0) return false;
+
+        // Scroll the primary element to the center of the viewport
+        elements[0]!.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+
+        // Apply high-contrast red outline and glow to all matched elements
+        for (const el of elements) {
+          el.setAttribute('data-qa-prev-outline', el.style.outline || '');
+          el.setAttribute('data-qa-prev-boxshadow', el.style.boxShadow || '');
+          el.style.setProperty('outline', '3px solid #ef4444', 'important');
+          el.style.setProperty('outline-offset', '3px', 'important');
+          el.style.setProperty('box-shadow', '0 0 0 5px rgba(239, 68, 68, 0.35), 0 0 16px rgba(239, 68, 68, 0.8)', 'important');
+        }
+
+        // Add a high-visibility badge tag next to the primary element
+        const firstRect = elements[0]!.getBoundingClientRect();
+        const badge = document.createElement('div');
+        badge.id = '__qa_highlight_tag__';
+        badge.style.position = 'fixed';
+        badge.style.left = `${Math.max(4, firstRect.left)}px`;
+        badge.style.top = `${Math.max(4, firstRect.top - 24)}px`;
+        badge.style.backgroundColor = '#ef4444';
+        badge.style.color = '#ffffff';
+        badge.style.fontSize = '12px';
+        badge.style.fontWeight = 'bold';
+        badge.style.fontFamily = 'monospace, sans-serif';
+        badge.style.padding = '3px 8px';
+        badge.style.borderRadius = '4px';
+        badge.style.zIndex = '2147483647';
+        badge.style.pointerEvents = 'none';
+        badge.style.boxShadow = '0 2px 8px rgba(0,0,0,0.6)';
+        badge.textContent = `⚠ ${payload.ruleId}`;
+        document.body.appendChild(badge);
+
+        return true;
+      },
+      { selector: sel, ruleId: finding.ruleId }
+    );
+
+    if (!highlighted) {
+      return captureElementCrop(controller, store, runId, finding);
+    }
+
+    await controller.page.waitForTimeout(60);
+    const png = await controller.page.screenshot({ type: 'png' });
+
+    // Clean up DOM modifications
+    await controller.page.evaluate(() => {
+      const tagged = document.querySelectorAll<HTMLElement>('[data-qa-prev-outline]');
+      for (const el of Array.from(tagged)) {
+        const prevOutline = el.getAttribute('data-qa-prev-outline') || '';
+        const prevShadow = el.getAttribute('data-qa-prev-boxshadow') || '';
+        if (prevOutline) el.style.outline = prevOutline; else el.style.removeProperty('outline');
+        if (prevShadow) el.style.boxShadow = prevShadow; else el.style.removeProperty('box-shadow');
+        el.style.removeProperty('outline-offset');
+        el.removeAttribute('data-qa-prev-outline');
+        el.removeAttribute('data-qa-prev-boxshadow');
+      }
+      document.getElementById('__qa_highlight_tag__')?.remove();
+    }).catch(() => undefined);
+
+    return store.saveBinary(runId, 'element-crop', png, 'png', {
+      page: finding.page,
+      viewport: finding.viewport,
+      label: `Highlighted element (${finding.ruleId}) in context`,
+    });
+  } catch {
+    return captureElementCrop(controller, store, runId, finding);
+  }
+}
+
+/** Element crop for one finding (tight bounding box fallback). */
 export async function captureElementCrop(controller: BrowserController, store: EvidenceStore, runId: string, finding: Finding): Promise<EvidenceRef | undefined> {
   const sel = finding.element?.selector;
   if (!sel || sel.length > 400) return undefined;
@@ -66,6 +165,6 @@ export function evidenceFor(finding: Finding, ev: PageEvidence, crop?: EvidenceR
     functional: ['network', 'console', 'dom'], accessibility: ['dom', 'aria'],
     visual: ['visualCurrent', 'visualBaseline', 'visualDiff'],
   };
-  const refs = [...pick('screenshot'), ...(crop ? [crop] : []), ...pick(...(byCategory[finding.category] ?? ['dom'])), ...pick('metadata')];
+  const refs = [...(crop ? [crop] : []), ...pick('screenshot'), ...pick(...(byCategory[finding.category] ?? ['dom'])), ...pick('metadata')];
   return [...new Map(refs.map((r) => [r.id, r])).values()];
 }

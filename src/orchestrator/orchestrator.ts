@@ -30,6 +30,7 @@ export class Orchestrator {
   private readonly active = new Map<string, ActiveRun>();
   private readonly buffers = new Map<string, ProgressEvent[]>();
   private readonly seq = new Map<string, number>();
+  private readonly latestFrames = new Map<string, { url: string; viewport: string; action: string; buffer?: Buffer; at: number }>();
 
   constructor(readonly opts: OrchestratorOptions) { this.events.setMaxListeners(100); }
 
@@ -85,7 +86,13 @@ export class Orchestrator {
     const snapshot = emptySnapshot(runId, run.status);
     const timer = setTimeout(() => abort.abort('timeout'), cfg.timeouts.runMs);
     // `auth` is captured only by this closure/executor and released when the run ends (the executor is not retained).
-    const hooks = { signal: abort.signal, snapshot, auth, emit: (type: ProgressEventType, message: string, data?: Record<string, unknown>) => this.emit(runId, type, message, data) };
+    const hooks = {
+      signal: abort.signal,
+      snapshot,
+      auth,
+      emit: (type: ProgressEventType, message: string, data?: Record<string, unknown>) => this.emit(runId, type, message, data),
+      setFrame: (frame: { url: string; viewport: string; action: string; buffer?: Buffer }) => this.setFrame(runId, frame),
+    };
     const executor = new RunExecutor(this.opts, runId, hooks);
     const done = executor.execute().catch((e) => {
       this.db.setStatus(runId, 'ERROR', { error: e instanceof Error ? e.message : String(e) });
@@ -180,4 +187,60 @@ export class Orchestrator {
     const f = path.join(this.opts.reportsDir, runId, `report.${kind}`);
     return fs.existsSync(f) ? f : null;
   }
+
+  setFrame(runId: string, frame: { url: string; viewport: string; action: string; buffer?: Buffer }): void {
+    this.latestFrames.set(runId, { ...frame, at: Date.now() });
+  }
+
+  getFrame(runId: string): { url: string; viewport: string; action: string; buffer?: Buffer; at: number } | undefined {
+    return this.latestFrames.get(runId);
+  }
+
+  buildSimulation(runId: string) {
+    const actions = this.db.listActions(runId);
+    const evidence = this.db.listEvidence(runId);
+    const findings = this.db.listFindings(runId);
+    const run = this.db.getRun(runId);
+    const defaultUrl = run?.url ?? '';
+
+    const screenshotMap = new Map<string, string>();
+    const pageScreenshotMap = new Map<string, string>();
+    for (const e of evidence) {
+      if ((e.kind === 'visual-current' || e.kind === 'screenshot') && e.page) {
+        if (!pageScreenshotMap.has(e.page)) pageScreenshotMap.set(e.page, `/api/runs/${runId}/evidence/${e.id}`);
+        if (e.viewport) {
+          const vpKey = `${e.page}|${e.viewport}`;
+          if (!screenshotMap.has(vpKey)) screenshotMap.set(vpKey, `/api/runs/${runId}/evidence/${e.id}`);
+        }
+      }
+    }
+
+    return actions.map((a, idx) => {
+      const pageUrl = a.pageUrl || defaultUrl;
+      const vp = a.viewport || 'desktop';
+      const screenshotUrl = screenshotMap.get(`${pageUrl}|${vp}`) || pageScreenshotMap.get(pageUrl) || null;
+      const stepFindings = findings.filter((f) => f.page === pageUrl && (!a.viewport || f.viewport === a.viewport));
+
+      return {
+        id: a.id ?? idx + 1,
+        url: pageUrl,
+        viewport: vp,
+        source: a.source,
+        action: a.type,
+        target: a.target,
+        ok: !!a.ok,
+        detail: a.detail || null,
+        at: a.at,
+        screenshotUrl,
+        findingsCount: stepFindings.length,
+        findings: stepFindings.slice(0, 3).map((f) => ({
+          id: f.id,
+          ruleId: f.ruleId,
+          severity: f.severity,
+          actual: f.actual,
+        })),
+      };
+    });
+  }
 }
+

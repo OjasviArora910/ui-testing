@@ -31,7 +31,7 @@ export class BrowserController {
   private browser!: Browser;
   private context!: BrowserContext;
   private _page!: Page;
-  private viewport: Viewport;
+  private _viewport: Viewport;
   private tracing = false;
   private requestGuard: ((req: { method: string; url: string }) => boolean) | null = null;
   private lastStatus: number | undefined;
@@ -41,7 +41,7 @@ export class BrowserController {
   private constructor(private opts: BrowserControllerOptions) {
     this.redactor = opts.redactor ?? new Redactor();
     this.events = new EventCollector(this.redactor, opts.ignoredEndpoints ?? []);
-    this.viewport = opts.viewport ?? DEFAULT_VIEWPORT;
+    this._viewport = opts.viewport ?? DEFAULT_VIEWPORT;
   }
 
   static async launch(opts: BrowserControllerOptions): Promise<BrowserController> {
@@ -53,7 +53,7 @@ export class BrowserController {
   private async init(): Promise<void> {
     const executablePath = this.opts.executablePath ?? process.env.QA_CHROMIUM_PATH ?? undefined;
     this.browser = await chromium.launch({ headless: this.opts.headless ?? true, executablePath, args: this.opts.launchArgs });
-    this.context = await this.browser.newContext({ viewport: { width: this.viewport.width, height: this.viewport.height } });
+    this.context = await this.browser.newContext({ viewport: { width: this._viewport.width, height: this._viewport.height } });
     this.context.setDefaultTimeout(this.opts.actionTimeoutMs ?? 8000);
     this.context.setDefaultNavigationTimeout(this.opts.navigationTimeoutMs ?? 30000);
     await applyAuth(this.context, this.opts.baseUrl, this.opts.auth, this.redactor);
@@ -79,14 +79,15 @@ export class BrowserController {
   }
 
   get page(): Page { return this._page; }
-  get currentViewport(): Viewport { return this.viewport; }
+  get currentViewport(): Viewport { return this._viewport; }
+  get viewport(): Viewport { return this._viewport; }
   get url(): string { return this.redactor.redactUrl(this._page.url()); }
 
   /** Install (or clear with null) a predicate; requests for which it returns false are aborted before leaving the browser. */
   setRequestGuard(fn: ((req: { method: string; url: string }) => boolean) | null): void { this.requestGuard = fn; }
 
   async setViewport(v: Viewport): Promise<void> {
-    this.viewport = v;
+    this._viewport = v;
     await this._page.setViewportSize({ width: v.width, height: v.height });
   }
 

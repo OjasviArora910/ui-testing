@@ -206,6 +206,11 @@ export class QADatabase {
     const rows = this.db.prepare(`SELECT finding_id, analysis_json FROM ai_analyses WHERE run_id = ? AND status = 'accepted' AND finding_id IS NOT NULL ORDER BY id`).all(runId) as { finding_id: string; analysis_json: string }[];
     return new Map(rows.map((r) => [r.finding_id, JSON.parse(r.analysis_json) as AIAnalysis]));
   }
+  /** Latest rejection reason per finding (for quota, rate limits, or validation errors). */
+  aiErrorsByFinding(runId: string): Map<string, string> {
+    const rows = this.db.prepare(`SELECT finding_id, reject_reason FROM ai_analyses WHERE run_id = ? AND status = 'rejected' AND finding_id IS NOT NULL ORDER BY id`).all(runId) as { finding_id: string; reject_reason: string | null }[];
+    return new Map(rows.map((r) => [r.finding_id, r.reject_reason || 'AI analysis unavailable']));
+  }
   listAnalyses(runId: string): { findingId: string | null; provider: string; model: string; status: string; rejectReason: string | null; analysis: AIAnalysis | null }[] {
     return (this.db.prepare('SELECT * FROM ai_analyses WHERE run_id = ? ORDER BY id').all(runId) as Row[]).map((r) => ({
       findingId: (r.finding_id as string) ?? null, provider: r.provider as string, model: r.model as string, status: r.status as string, rejectReason: (r.reject_reason as string) ?? null, analysis: parse<AIAnalysis>(r.analysis_json),

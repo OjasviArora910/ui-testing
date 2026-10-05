@@ -47,6 +47,9 @@ export async function testLinks(ctx: FunctionalContext): Promise<FunctionalResul
     if (!(await resetPage(ctx))) break;
 
     const loc = c.locate({ css: l.selector });
+    const rawBox = (await loc.boundingBox().catch(() => null)) ?? null;
+    const box = rawBox ? { ...rawBox, vpWidth: c.viewport.width, vpHeight: c.viewport.height } : null;
+    ctx.onAction?.({ type: 'checking', target: label, ok: true, box });
     try {
       await loc.scrollIntoViewIfNeeded({ timeout: 2000 });
       await loc.click({ trial: true, timeout: 3000 });
@@ -62,12 +65,14 @@ export async function testLinks(ctx: FunctionalContext): Promise<FunctionalResul
     if (!ctx.budget.consume()) break;
     const n0 = c.events.network.length;
     let status: number | undefined;
+    let lastBuf: Buffer | undefined;
     let usedClick = l.target !== '_blank';
     if (usedClick) {
       const r = await c.click({ css: l.selector });
       await c.page.waitForLoadState('load', { timeout: 5000 }).catch(() => undefined);
       await c.settle(150);
-      ctx.onAction?.({ type: 'click', target: label, ok: r.ok, detail: r.error });
+      lastBuf = await c.page.screenshot({ type: 'png' }).catch(() => undefined);
+      ctx.onAction?.({ type: 'click', target: label, ok: r.ok, detail: r.error, box, buffer: lastBuf });
       const doc = c.events.network.slice(n0).filter((n) => n.resourceType === 'document').pop();
       status = doc?.status ?? undefined;
       if (!r.ok) usedClick = false;
@@ -76,17 +81,18 @@ export async function testLinks(ctx: FunctionalContext): Promise<FunctionalResul
       const r = await c.navigate(target);
       status = r.status;
       await c.settle(150);
-      ctx.onAction?.({ type: 'navigate', target, ok: r.ok, detail: r.error });
+      lastBuf = await c.page.screenshot({ type: 'png' }).catch(() => undefined);
+      ctx.onAction?.({ type: 'navigate', target, ok: r.ok, detail: r.error, box, buffer: lastBuf });
     }
 
     const finalUrl = c.url;
     if (status !== undefined && status >= 400) {
-      results.push({ ...BASE, check: 'navigation', status: 'fail', severity: 'major', basis: 'deterministic', element: el, expected: 'Link leads to a working page (HTTP < 400)', actual: `Link "${label}" -> ${target} returned HTTP ${status}`, details: { status, target } });
+      results.push({ ...BASE, check: 'navigation', status: 'fail', severity: 'major', basis: 'deterministic', element: el, expected: 'Link leads to a working page (HTTP < 400)', actual: `Link "${label}" -> ${target} returned HTTP ${status}`, details: { status, target }, screenshot: lastBuf });
       continue;
     }
     const heading = (await c.page.evaluate("(document.querySelector('h1,h2,title') || {}).textContent || ''") as string).trim();
     if (SOFT_404.test(heading) || SOFT_404.test(await c.page.title())) {
-      results.push({ ...BASE, check: 'soft-error-page', status: 'anomaly', severity: 'minor', basis: null, element: el, expected: 'Link leads to a content page', actual: `Link "${label}" leads to what looks like an error page ("${heading.slice(0, 60)}") although HTTP status was ${status ?? 'unknown'}` });
+      results.push({ ...BASE, check: 'soft-error-page', status: 'anomaly', severity: 'minor', basis: null, element: el, expected: 'Link leads to a content page', actual: `Link "${label}" leads to what looks like an error page ("${heading.slice(0, 60)}") although HTTP status was ${status ?? 'unknown'}`, screenshot: lastBuf });
       continue;
     }
     results.push({ ...BASE, check: 'navigation', status: 'pass', severity: 'info', basis: null, element: el, expected: 'Link works', actual: `Link "${label}" -> ${finalUrl} (HTTP ${status ?? 'n/a'})` });

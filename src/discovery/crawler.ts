@@ -18,6 +18,11 @@ export function normalizeUrl(href: string, base: string): string | null {
   u.hostname = u.hostname.toLowerCase();
   for (const k of [...u.searchParams.keys()]) if (TRACKING_PARAM.test(k)) u.searchParams.delete(k);
   u.searchParams.sort();
+  if (u.pathname.endsWith('/index.html')) {
+    u.pathname = u.pathname.slice(0, -10);
+  } else if (u.pathname.endsWith('/index.htm')) {
+    u.pathname = u.pathname.slice(0, -9);
+  }
   if (u.pathname.length > 1 && u.pathname.endsWith('/')) u.pathname = u.pathname.slice(0, -1);
   return u.toString();
 }

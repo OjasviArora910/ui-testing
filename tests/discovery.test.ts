@@ -13,6 +13,9 @@ describe('normalizeUrl', () => {
     expect(normalizeUrl('/a/?b=2&a=1#frag', b)).toBe('http://example.com/a?a=1&b=2');
     expect(normalizeUrl('/a?a=1&b=2&utm_source=x', b)).toBe('http://example.com/a?a=1&b=2');
     expect(normalizeUrl('http://example.com:80/x', b)).toBe('http://example.com/x');
+    expect(normalizeUrl('/index.html', 'http://example.com/')).toBe('http://example.com/');
+    expect(normalizeUrl('index.html', 'https://playwrightlab.github.io/')).toBe('https://playwrightlab.github.io/');
+    expect(normalizeUrl('/app/index.html', b)).toBe('http://example.com/app');
   });
   it('rejects non-page URLs', () => {
     expect(normalizeUrl('mailto:a@b.c', 'http://x.test')).toBeNull();

@@ -1,5 +1,8 @@
 export * from './actionGuard.js';
 export * from './types.js';
+export * from './intent.js';
+export * from './observer.js';
+export * from './verifier.js';
 export * from './runner.js';
 export * from './rules.js';
 export { testButtons } from './buttons.js';

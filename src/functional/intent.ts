@@ -1,0 +1,216 @@
+import type { ElementInfo } from '../browser/types.js';
+import type { ModelElement, PageModel } from '../discovery/types.js';
+import type { InferredIntent, SemanticIntentKind } from './types.js';
+
+export interface ClassifiableElement {
+  selector: string;
+  tag?: string;
+  type?: string;
+  role?: string | null;
+  name?: string;
+  text?: string;
+  href?: string | null;
+  aria?: {
+    expanded?: string | null;
+    haspopup?: boolean;
+    modal?: boolean;
+    disabled?: boolean;
+    invalid?: boolean;
+    live?: string | null;
+  };
+  meta?: Record<string, unknown>;
+  box?: { x: number; y: number; width: number; height: number };
+}
+
+const MODAL_DISMISS_REGEX = /^(close|dismiss|cancel|cancelar|schlie[ßs]en|fermer|✕|×)$/i;
+const MODAL_OPEN_REGEX = /\b(modal|dialog|popup|lightbox|drawer)\b/i;
+const SEARCH_REGEX = /\b(search|find|lookup|query|filter-search)\b/i;
+const FILTER_SORT_REGEX = /\b(filter|sort|order by|reorder|ascending|descending|view all|all categories|show only)\b/i;
+const SUBMIT_REGEX = /\b(submit|save|send|register|checkout|log in|sign in|sign up|create|update|apply changes|confirm)\b/i;
+
+/**
+ * Classifies an interactive element's semantic intent and establishes the
+ * expected observable outcomes for human-like QA verification.
+ */
+export function classifyElementIntent(
+  el: ClassifiableElement,
+  model?: PageModel,
+): InferredIntent {
+  const label = (el.name || el.text || '').trim();
+  const lowerLabel = label.toLowerCase();
+  const selector = el.selector || '';
+  const lowerSel = selector.toLowerCase();
+  const role = (el.role || '').toLowerCase();
+  const tag = (el.tag || '').toLowerCase();
+  const type = (el.type || '').toLowerCase();
+  const href = (el.href || '').trim();
+
+  // 1. TABS: role="tab" or selector/aria indicating tab navigation
+  if (role === 'tab' || lowerSel.includes('[role="tab"]') || lowerSel.includes('.tab') || lowerSel.includes('nav-tab')) {
+    return {
+      kind: 'SWITCH_TAB',
+      confidence: 'HIGH',
+      summary: `Switch to tab "${label}"`,
+      expectedOutcome: {
+        description: `Tab "${label}" should become aria-selected="true" and reveal its associated tabpanel content`,
+        expectedAriaSelected: true,
+        expectedDomMutation: true,
+        targetSelector: selector,
+      },
+    };
+  }
+
+  // 2. ACCORDION / COLLAPSE: <summary>, <details>, aria-expanded toggle
+  const isAriaExpanded = el.aria?.expanded !== null && el.aria?.expanded !== undefined;
+  if (
+    tag === 'summary' ||
+    lowerSel.includes('summary') ||
+    lowerSel.includes('accordion') ||
+    lowerSel.includes('collapse') ||
+    isAriaExpanded
+  ) {
+    const currentlyExpanded = el.aria?.expanded === 'true';
+    return {
+      kind: 'TOGGLE_ACCORDION',
+      confidence: 'HIGH',
+      summary: `Toggle accordion/collapsible "${label}"`,
+      expectedOutcome: {
+        description: currentlyExpanded
+          ? `Collapsible "${label}" should collapse and set aria-expanded="false"`
+          : `Collapsible "${label}" should expand and reveal content with aria-expanded="true"`,
+        expectedAriaExpanded: !currentlyExpanded,
+        expectedDomMutation: true,
+        targetSelector: selector,
+      },
+    };
+  }
+
+  // 3. MODAL DISMISS: Buttons inside dialogs or explicitly labeled close/dismiss/cancel
+  const isInsideDialog = lowerSel.includes('dialog') || lowerSel.includes('modal') || lowerSel.includes('.popup');
+  if (
+    MODAL_DISMISS_REGEX.test(lowerLabel) ||
+    lowerSel.includes('btn-close') ||
+    lowerSel.includes('modal-close') ||
+    lowerSel.includes('close-button') ||
+    (isInsideDialog && /cancel|close|dismiss/i.test(lowerLabel))
+  ) {
+    return {
+      kind: 'DISMISS_MODAL',
+      confidence: isInsideDialog || MODAL_DISMISS_REGEX.test(lowerLabel) ? 'HIGH' : 'MEDIUM',
+      summary: `Dismiss dialog/modal via "${label || 'close button'}"`,
+      expectedOutcome: {
+        description: `Open dialog or modal should close, hide, or remove from the active view`,
+        expectedModalClose: true,
+        expectedDomMutation: true,
+        targetSelector: selector,
+      },
+    };
+  }
+
+  // 4. OPEN MODAL: aria-haspopup="dialog" or explicit modal trigger
+  if (
+    el.aria?.haspopup ||
+    lowerSel.includes('modal-trigger') ||
+    lowerSel.includes('open-modal') ||
+    (MODAL_OPEN_REGEX.test(lowerLabel) && !href.startsWith('http'))
+  ) {
+    return {
+      kind: 'OPEN_MODAL',
+      confidence: el.aria?.haspopup ? 'HIGH' : 'MEDIUM',
+      summary: `Open modal/dialog via "${label}"`,
+      expectedOutcome: {
+        description: `A modal, dialog, or overlay should appear and become visible/active on screen`,
+        expectedModalOpen: true,
+        expectedDomMutation: true,
+        targetSelector: selector,
+      },
+    };
+  }
+
+  // 5. SEARCH: Search submit buttons or search box triggers
+  if (role === 'searchbox' || type === 'search' || SEARCH_REGEX.test(lowerLabel) || lowerSel.includes('search')) {
+    return {
+      kind: 'SEARCH',
+      confidence: 'MEDIUM',
+      summary: `Execute search for "${label || 'query'}"`,
+      expectedOutcome: {
+        description: `Search query should trigger results display, DOM filter, or search results navigation`,
+        expectedDomMutation: true,
+        targetSelector: selector,
+      },
+    };
+  }
+
+  // 6. FILTER OR SORT: Filter chips, sort toggles, dropdown filters
+  if (FILTER_SORT_REGEX.test(lowerLabel) || lowerSel.includes('filter') || lowerSel.includes('sort')) {
+    return {
+      kind: 'FILTER_OR_SORT',
+      confidence: 'MEDIUM',
+      summary: `Apply filter/sort option "${label}"`,
+      expectedOutcome: {
+        description: `Filtered list, table, or grid items should re-render or update based on "${label}"`,
+        expectedDomMutation: true,
+        targetSelector: selector,
+      },
+    };
+  }
+
+  // 7. TOGGLE: Switch or checkbox
+  if (role === 'switch' || role === 'checkbox' || type === 'checkbox') {
+    return {
+      kind: 'TOGGLE',
+      confidence: 'HIGH',
+      summary: `Toggle switch/checkbox "${label}"`,
+      expectedOutcome: {
+        description: `Checkbox/switch state should toggle (checked/aria-checked inverted)`,
+        expectedAriaChecked: true,
+        expectedDomMutation: true,
+        targetSelector: selector,
+      },
+    };
+  }
+
+  // 8. FORM SUBMIT: Explicit submit buttons or submit actions inside forms
+  const isSubmitType = type === 'submit';
+  const isInsideForm = lowerSel.includes('form') || (model?.forms.some((f) => f.selector && selector.startsWith(f.selector)) ?? false);
+  if (isSubmitType || (isInsideForm && SUBMIT_REGEX.test(lowerLabel))) {
+    return {
+      kind: 'SUBMIT_FORM',
+      confidence: 'HIGH',
+      summary: `Submit form via button "${label}"`,
+      expectedOutcome: {
+        description: `Form submission should trigger client-side validation messages, an API POST/PUT request, or a confirmation state`,
+        expectedValidation: true,
+        expectedNetworkWrite: true,
+        expectedDomMutation: true,
+        targetSelector: selector,
+      },
+    };
+  }
+
+  // 9. NAVIGATION: Links or destination buttons
+  if (role === 'link' || tag === 'a' || (href && href !== '#' && !href.startsWith('javascript:'))) {
+    return {
+      kind: 'NAVIGATE',
+      confidence: 'HIGH',
+      summary: `Navigate to link destination "${label}"`,
+      expectedOutcome: {
+        description: `Clicking link "${label}" should navigate to destination URL or change document state`,
+        expectedUrlChange: true,
+        targetSelector: selector,
+      },
+    };
+  }
+
+  // 10. GENERAL INTERACTIVE ACTION: Any other button or clickable control
+  return {
+    kind: 'GENERAL_ACTION',
+    confidence: 'LOW',
+    summary: `Trigger button "${label}"`,
+    expectedOutcome: {
+      description: `Action on "${label}" should produce an observable side effect (DOM change, state update, dialog, toast, or network request)`,
+      expectedDomMutation: true,
+      targetSelector: selector,
+    },
+  };
+}
