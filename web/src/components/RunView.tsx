@@ -31,6 +31,106 @@ type MainTab = 'findings' | 'accessibility' | 'selection' | 'review' | 'activity
 
 const TERMINAL = ['COMPLETED', 'ABORTED', 'ERROR', 'REVIEW'];
 
+type FindingGroup = {
+  key: string;
+  ruleId: string;
+  category: string;
+  severity: Severity;
+  expected: string;
+  findings: Finding[];
+  viewports: Set<string>;
+  uniqueElements: number;
+};
+
+const SEVERITY_RANK: Record<Severity, number> = { critical: 4, major: 3, minor: 2, info: 1 };
+
+const ISSUE_TITLES: Record<string, string> = {
+  'geometry.text-clipping': 'Text is clipped',
+  'geometry.overlap': 'Elements overlap',
+  'geometry.viewport-overflow': 'Content extends beyond the viewport',
+  'geometry.parent-overflow': 'Content overflows its container',
+  'geometry.offscreen': 'Element is off screen',
+  'geometry.image-distortion': 'Image appears distorted',
+  'responsive.table-overflow': 'Table does not fit the viewport',
+  'responsive.image-overflow': 'Image does not fit the viewport',
+  'responsive.dialog-overflow': 'Dialog does not fit the viewport',
+  'functional.link': 'Broken link',
+  'functional.button': 'Button did not work as expected',
+  'functional.form': 'Form validation failed',
+  'functional.search': 'Search did not work as expected',
+  'functional.modal': 'Modal did not work as expected',
+  'functional.interactive': 'Form control did not work as expected',
+  'visual.regression': 'Visual regression detected',
+  'visual.no-baseline': 'Visual baseline is missing',
+};
+
+function buildFindingGroups(items: Finding[]): FindingGroup[] {
+  const map = new Map<string, FindingGroup>();
+  for (const f of items) {
+    const groupKey = f.problemKey ?? f.ruleId;
+    const existing = map.get(groupKey);
+    if (existing) {
+      existing.findings.push(f);
+      existing.viewports.add(f.viewport);
+      if (SEVERITY_RANK[f.severity] > SEVERITY_RANK[existing.severity]) existing.severity = f.severity;
+    } else {
+      map.set(groupKey, {
+        key: groupKey,
+        ruleId: f.ruleId,
+        category: f.category,
+        severity: f.severity,
+        expected: f.expected,
+        findings: [f],
+        viewports: new Set([f.viewport]),
+        uniqueElements: 0,
+      });
+    }
+  }
+  const groups = Array.from(map.values());
+  for (const g of groups) {
+    const selectors = new Set(g.findings.map((f) => f.element?.selector || f.id));
+    g.uniqueElements = selectors.size;
+  }
+  return groups.sort((a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity] || b.findings.length - a.findings.length);
+}
+
+function issueTitle(group: FindingGroup): string {
+  return ISSUE_TITLES[group.ruleId] ?? group.ruleId
+    .split('.')
+    .slice(-1)[0]
+    ?.replace(/[-_]/g, ' ')
+    .replace(/\b\w/g, (m) => m.toUpperCase()) ?? 'Issue detected';
+}
+
+function issueExplanation(group: FindingGroup): string {
+  const first = group.findings[0];
+  if (first?.expected) return first.expected;
+  return group.expected || 'The automated test found behavior that should be inspected.';
+}
+
+function pathOf(raw: string): string {
+  try {
+    const u = new URL(raw);
+    return u.pathname + u.search || '/';
+  } catch {
+    return raw;
+  }
+}
+
+function pageSummary(findings: Finding[]): string {
+  const pages = [...new Set(findings.map((f) => pathOf(f.page)))];
+  if (pages.length === 0) return 'No page recorded';
+  if (pages.length <= 2) return pages.join(', ');
+  return `${pages.slice(0, 2).join(', ')} +${pages.length - 2} more`;
+}
+
+function simpleCategory(category: string): 'layout' | 'functional' | 'responsive' | 'other' {
+  if (category === 'layout' || category.startsWith('geometry')) return 'layout';
+  if (category === 'functional') return 'functional';
+  if (category === 'responsive' || category === 'visual') return 'responsive';
+  return 'other';
+}
+
 const CATEGORY_META: Record<string, { label: string; icon: string; desc: string }> = {
   layout: { label: 'Layout', icon: '📐', desc: 'Overlaps, text clipping, overflows' },
   functional: { label: 'Functional', icon: '⚡', desc: 'Buttons, links, and form validation' },
@@ -55,6 +155,8 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
   const [sortBy, setSortBy] = useState<'severity' | 'category' | 'page' | 'newest'>('severity');
   const [viewMode, setViewMode] = useState<'grouped' | 'flat'>('grouped');
   const [expandedRules, setExpandedRules] = useState<Record<string, boolean>>({});
+  const [selectedIssueKey, setSelectedIssueKey] = useState<string | null>(null);
+  const [selectedOccurrenceId, setSelectedOccurrenceId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [resumeOpen, setResumeOpen] = useState(false);
   const [resumeToken, setResumeToken] = useState<TokenState>(emptyToken);
@@ -111,6 +213,7 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
       setEvents((prev) => (prev.some((p) => p.seq === ev.seq) ? prev : [...prev.slice(-400), ev]));
       // a page was classified and its tests selected: show the decision while the run is still going
       if (ev.type === 'page' && ev.data?.decision) void api.dynamic(runId).then(setDynamic).catch(() => undefined);
+      if (ev.type === 'finding') void api.findings(runId).then(setFindings).catch(() => undefined);
       if (ev.type === 'page' && ev.data?.readiness) void api.readiness(runId).then(setReadiness).catch(() => undefined);
       if (ev.type === 'done' || ev.type === 'error' || (ev.type === 'status' && ev.message === 'REPORTING')) {
         void reload();
@@ -184,48 +287,8 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
   }, [uiFindings, severityFilter, categoryFilter, stateFilter, search, sortBy]);
 
   // Grouped by underlying problem: the same failure on several elements, pages or viewports is one entry
-  const groupedFindings = useMemo(() => {
-    const map = new Map<string, {
-      ruleId: string;
-      category: string;
-      severity: Severity;
-      expected: string;
-      findings: Finding[];
-      viewports: Set<string>;
-      uniqueElements: number;
-    }>();
-
-    for (const f of filteredFindings) {
-      const existing = map.get(f.problemKey ?? f.ruleId);
-      if (existing) {
-        existing.findings.push(f);
-        existing.viewports.add(f.viewport);
-        const order: Severity[] = ['critical', 'major', 'minor', 'info'];
-        if (order.indexOf(f.severity) < order.indexOf(existing.severity)) {
-          existing.severity = f.severity;
-        }
-      } else {
-        map.set(f.problemKey ?? f.ruleId, {
-          ruleId: f.ruleId,
-          category: f.category,
-          severity: f.severity,
-          expected: f.expected,
-          findings: [f],
-          viewports: new Set([f.viewport]),
-          uniqueElements: 0,
-        });
-      }
-    }
-
-    const groups = Array.from(map.values());
-    for (const g of groups) {
-      const selectors = new Set(g.findings.map((f) => f.element?.selector || f.id));
-      g.uniqueElements = selectors.size;
-    }
-
-    const rank: Record<Severity, number> = { critical: 4, major: 3, minor: 2, info: 1 };
-    return groups.sort((a, b) => (rank[b.severity] || 0) - (rank[a.severity] || 0) || b.findings.length - a.findings.length);
-  }, [filteredFindings]);
+  const groupedFindings = useMemo(() => buildFindingGroups(filteredFindings), [filteredFindings]);
+  const allGroupedFindings = useMemo(() => buildFindingGroups(uiFindings), [uiFindings]);
 
   // Severity metrics breakdown
   const severityCounts = useMemo(() => {
@@ -246,6 +309,32 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
   }, [uiFindings, a11yFindings]);
 
   const allCategories = ['layout', 'functional', 'accessibility', 'network', 'usability', 'responsive', 'performance'];
+  const completedIssueGroups = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return allGroupedFindings.filter((group) => {
+      if (severityFilter !== 'all' && group.severity !== severityFilter) return false;
+      if (categoryFilter !== 'all' && simpleCategory(group.category) !== categoryFilter) return false;
+      if (!q) return true;
+      const title = issueTitle(group).toLowerCase();
+      return title.includes(q)
+        || group.ruleId.toLowerCase().includes(q)
+        || group.findings.some((f) =>
+          f.actual.toLowerCase().includes(q)
+          || f.expected.toLowerCase().includes(q)
+          || f.page.toLowerCase().includes(q)
+          || (f.element?.name ?? '').toLowerCase().includes(q)
+          || (f.element?.selector ?? '').toLowerCase().includes(q)
+        );
+    });
+  }, [allGroupedFindings, categoryFilter, search, severityFilter]);
+  const selectedIssue = selectedIssueKey ? allGroupedFindings.find((group) => group.key === selectedIssueKey) ?? null : null;
+  const selectedOccurrence = selectedIssue
+    ? selectedIssue.findings.find((f) => f.id === selectedOccurrenceId) ?? selectedIssue.findings[0] ?? null
+    : null;
+  const distinctIssues = allGroupedFindings.length;
+  const totalOccurrences = uiFindings.length;
+  const screenshots = selectedOccurrence?.evidence.filter((e) => e.mime === 'image/png' || e.mime === 'image/jpeg') ?? [];
+  const firstScreenshot = screenshots[0];
 
   if (!run) {
     return (
@@ -274,7 +363,7 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
   }
 
   return (
-    <div className="run-view-container">
+    <div className={`run-view-container ${active ? 'run-active' : ''}`}>
       {/* Evidence Lightbox Modal */}
       {activeEvidence && (
         <EvidenceModal
@@ -431,6 +520,7 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
           url={run.url}
           startTime={run.createdAt}
           events={events}
+          findings={uiFindings}
           onStop={() => void stopRun()}
           stopping={stopping}
         />
@@ -442,6 +532,197 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
           <strong>{run.state === 'ERROR' ? 'FAILED' : 'ABORTED'}</strong> {run.note}
         </div>
       )}
+
+      {!active && (
+        <section className="completed-results-shell">
+          <div className="completed-findings-heading">
+            <h2>{distinctIssues} {distinctIssues === 1 ? 'Issue' : 'Issues'} Found</h2>
+            <p>{totalOccurrences} total {totalOccurrences === 1 ? 'occurrence' : 'occurrences'}</p>
+          </div>
+
+          <div className="completed-results-layout">
+            <section className="issue-list-panel">
+              <div className="issue-list-toolbar">
+                <div className="search-box issue-search">
+                  <IconSearch style={{ width: 16, height: 16 }} className="search-icon" />
+                  <input
+                    type="text"
+                    placeholder="Search issues..."
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                    className="search-input"
+                  />
+                </div>
+                <select
+                  value={severityFilter}
+                  onChange={(e) => setSeverityFilter(e.target.value)}
+                  className="filter-select"
+                  aria-label="Severity"
+                >
+                  <option value="all">All severity</option>
+                  <option value="critical">Critical</option>
+                  <option value="major">Major</option>
+                  <option value="minor">Minor</option>
+                  <option value="info">Info</option>
+                </select>
+              </div>
+
+              <div className="issue-filter-chips" aria-label="Issue category filters">
+                {[
+                  ['all', 'All'],
+                  ['layout', 'Layout'],
+                  ['functional', 'Functional'],
+                ].map(([value, label]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    className={`issue-chip ${categoryFilter === value ? 'active' : ''}`}
+                    onClick={() => setCategoryFilter(value)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              {completedIssueGroups.length === 0 ? (
+                <div className="empty-state-box">
+                  <h3 className="empty-state-title">{uiFindings.length === 0 ? 'No UI/UX issues found' : 'No matching issues'}</h3>
+                  <p className="empty-state-desc">
+                    {uiFindings.length === 0 ? 'The completed run did not report UI/UX defects.' : 'Try clearing search or filters.'}
+                  </p>
+                </div>
+              ) : (
+                <div className="issue-list">
+                  {completedIssueGroups.map((group) => (
+                    <article className={`issue-row ${selectedIssueKey === group.key ? 'selected' : ''}`} key={group.key}>
+                      <div className="issue-severity">
+                        <span className={`severity-badge s-${group.severity}`}>{group.severity.toUpperCase()}</span>
+                      </div>
+                      <div className="issue-row-main">
+                        <h3>{issueTitle(group)}</h3>
+                        <p>{issueExplanation(group)}</p>
+                        <div className="issue-row-meta">
+                          <span>{group.findings.length} {group.findings.length === 1 ? 'occurrence' : 'occurrences'}</span>
+                          <span>{pageSummary(group.findings)}</span>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        className="btn btn-primary btn-sm"
+                        onClick={() => {
+                          setSelectedIssueKey(group.key);
+                          setSelectedOccurrenceId(group.findings[0]?.id ?? null);
+                        }}
+                      >
+                        View
+                      </button>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </section>
+
+            <aside className={`issue-detail-drawer ${selectedIssue && selectedOccurrence ? 'open' : ''}`}>
+              {selectedIssue && selectedOccurrence ? (
+                <>
+                  <div className="drawer-header">
+                    <div>
+                      <span className={`severity-badge s-${selectedIssue.severity}`}>{selectedIssue.severity.toUpperCase()}</span>
+                      <h3>{issueTitle(selectedIssue)}</h3>
+                    </div>
+                    <button type="button" className="btn btn-ghost btn-sm" onClick={() => setSelectedIssueKey(null)}>Close</button>
+                  </div>
+
+                  {selectedIssue.findings.length > 1 && (
+                    <div className="occurrence-selector">
+                      {selectedIssue.findings.map((finding, index) => (
+                        <button
+                          key={finding.id}
+                          type="button"
+                          className={selectedOccurrence.id === finding.id ? 'active' : ''}
+                          onClick={() => setSelectedOccurrenceId(finding.id)}
+                        >
+                          Occurrence {index + 1} - {pathOf(finding.page)}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="drawer-facts">
+                    <div><span>Affected page</span><strong>{pathOf(selectedOccurrence.page)}</strong></div>
+                    <div><span>Affected element</span><strong>{selectedOccurrence.element?.name || selectedOccurrence.element?.selector || 'Element not recorded'}</strong></div>
+                    <div><span>Expected</span><p>{selectedOccurrence.expected}</p></div>
+                    <div><span>Actual</span><p>{selectedOccurrence.actual}</p></div>
+                  </div>
+
+                  {firstScreenshot ? (
+                    <button
+                      type="button"
+                      className="drawer-evidence-preview"
+                      onClick={() => setActiveEvidence({ item: firstScreenshot, meta: { page: selectedOccurrence.page, viewport: selectedOccurrence.viewport, ruleId: selectedOccurrence.ruleId } })}
+                    >
+                      <img src={firstScreenshot.url} alt={firstScreenshot.label} />
+                      <span>View screenshot</span>
+                    </button>
+                  ) : (
+                    <div className="drawer-empty-evidence">No screenshot evidence attached to this occurrence.</div>
+                  )}
+
+                  <div className="drawer-disclosures">
+                    <details>
+                      <summary>Technical Details</summary>
+                      <div className="technical-details-content">
+                        <div>
+                          <span>Rule ID</span>
+                          <code>{selectedOccurrence.ruleId}</code>
+                        </div>
+                        <div>
+                          <span>Measurements</span>
+                          <p>{selectedOccurrence.actual}</p>
+                        </div>
+                        <div>
+                          <span>Why this was flagged</span>
+                          <p>{selectedOccurrence.basis || selectedOccurrence.context?.why || selectedOccurrence.expected}</p>
+                        </div>
+                        <div>
+                          <span>DOM evidence</span>
+                          <code>{selectedOccurrence.element?.selector || 'No selector recorded'}</code>
+                        </div>
+                        <div>
+                          <span>Network / console evidence</span>
+                          <p>Related network and console evidence remains available in the generated report and raw evidence.</p>
+                        </div>
+                        {selectedOccurrence.ai && (
+                          <div>
+                            <span>AI analysis</span>
+                            <p>{selectedOccurrence.ai.explanation}</p>
+                            <p>{selectedOccurrence.ai.likelyRootCause}</p>
+                          </div>
+                        )}
+                      </div>
+                      <FindingCard
+                        finding={selectedOccurrence}
+                        onDecide={(d, note) => act(() => api.decide(selectedOccurrence.id, d, note), `Decision saved: ${d}`)}
+                        onApproveBaseline={(p, v) => act(() => api.approveBaseline(runId, p, v), 'Baseline approved')}
+                        onViewEvidence={(item, meta) => setActiveEvidence({ item, meta })}
+                      />
+                    </details>
+                  </div>
+                </>
+              ) : (
+                <div className="drawer-placeholder">
+                  <h3>Select an issue</h3>
+                  <p>Choose the issue that looks most important to inspect its evidence without losing your place in the list.</p>
+                </div>
+              )}
+            </aside>
+          </div>
+        </section>
+      )}
+
+      {!active && (
+      <details className="advanced-test-details">
+        <summary>Advanced Test Details</summary>
       <ReadinessPanel pages={readiness} />
 
       <section className="metrics-grid">
@@ -803,10 +1084,10 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
           ) : viewMode === 'grouped' ? (
             <div className="findings-grouped-stream">
               {groupedFindings.map((group) => {
-                const isExpanded = !!expandedRules[group.ruleId];
+                const isExpanded = !!expandedRules[group.key];
                 return (
-                  <div key={group.ruleId} className="rule-group-card">
-                    <div className="rule-group-header" onClick={() => toggleRuleExpand(group.ruleId)}>
+                  <div key={group.key} className="rule-group-card">
+                    <div className="rule-group-header" onClick={() => toggleRuleExpand(group.key)}>
                       <div className="rule-group-title-row">
                         <div className="rule-group-badges">
                           <span className={`severity-badge s-${group.severity}`}>
@@ -832,7 +1113,7 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
                             className="btn-toggle-expand"
                             onClick={(e) => {
                               e.stopPropagation();
-                              toggleRuleExpand(group.ruleId);
+                              toggleRuleExpand(group.key);
                             }}
                           >
                             {isExpanded ? 'Collapse ▲' : `View ${group.findings.length} instances ▼`}
@@ -955,6 +1236,8 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
             </div>
           </div>
         </div>
+      )}
+      </details>
       )}
     </div>
   );
