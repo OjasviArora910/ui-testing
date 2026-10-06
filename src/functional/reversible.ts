@@ -14,8 +14,8 @@ import type { FunctionalContext, FunctionalResult } from './types.js';
  */
 const MARK = 'data-qa-rc';
 const BASE = { kind: 'interactive' as const };
-const MAX_PER_REVEAL = 15;
-const MAX_PER_PAGE = 60;
+const MAX_PER_REVEAL = 25;
+const MAX_PER_PAGE = 150;
 /** Controls that take access away from someone are never operated, even reversibly. */
 const NEVER = /\b(lock(ed)?[\s-]?out|lockout|suspend|revoke|deactivate|terminate|ban(ned)?|block (user|account|access)|disable (user|account|login|access))\b/i;
 
@@ -62,7 +62,7 @@ const DISCOVER_SCRIPT = `((mark, onlyNew, max) => {
     if (tag === 'input' && type === 'range') return ['slider', true];
     if (role === 'slider' || /(^|\\s)(ui-slider-handle|noUi-handle|rc-slider-handle|MuiSlider-thumb|slider-handle)(\\s|$)/.test(String(el.className))) return ['slider', false];
     if (tag === 'select') return el.multiple ? null : ['select', true];
-    if (role === 'tab') return el.getAttribute('aria-selected') === 'true' ? null : ['tab', false];
+    if (role === 'tab') return onlyNew ? null : (el.getAttribute('aria-selected') === 'true' ? null : ['tab', false]);
     if (tag === 'textarea') return ['text', true];
     if (tag === 'input' && ['', 'text', 'search', 'email', 'number', 'tel', 'url'].includes(type)) return ['text', true];
     return null; // radios, files, passwords, dates, colours, hidden inputs, buttons: not operated
@@ -70,9 +70,10 @@ const DISCOVER_SCRIPT = `((mark, onlyNew, max) => {
   const out = [];
   for (const el of document.querySelectorAll(CANDIDATES)) {
     if (out.length >= max) break;
-    if (!visible(el) || (onlyNew && seen.has(el))) continue;
+    if (!visible(el) || (onlyNew && (seen.has(el) || (window.__qaTestedControls && window.__qaTestedControls.has(el))))) continue;
     const k = kindOf(el); if (!k) continue;
     el.setAttribute(mark, String(out.length));
+    if (onlyNew && window.__qaTestedControls) window.__qaTestedControls.add(el); // a control is tested once, however many states show it
     out.push({ id: out.length, kind: k[0], native: k[1], label: labelOf(el).slice(0, 120), path: pathOf(el), type: (el.getAttribute('type') || el.tagName).toLowerCase() });
   }
   return out;
@@ -103,7 +104,7 @@ const pageCount = new WeakMap<object, number>();
 /** Call just before a click: notes which state controls are already on screen, so that what the click reveals can be told apart. */
 export async function rememberControls(c: BrowserController): Promise<void> {
   // kept in the page's memory; the DOM is not touched, so the observation of the click is not disturbed
-  await c.page.evaluate(`(() => { ${COMMON} window.__qaSeenControls = new WeakSet(Array.from(document.querySelectorAll(CANDIDATES)).filter(visible)); window.__qaSeenContent = new WeakSet(Array.from(document.querySelectorAll(${JSON.stringify(REVEAL_SEL)})).filter(visible)); })()`).catch(() => undefined);
+  await c.page.evaluate(`(() => { ${COMMON} window.__qaSeenControls = new WeakSet(Array.from(document.querySelectorAll(CANDIDATES)).filter(visible)); window.__qaRootSeen = new WeakSet(Array.from(document.querySelectorAll('body *')).filter(visible)); window.__qaTestedControls = new WeakSet(); window.__qaSeenContent = new WeakSet(Array.from(document.querySelectorAll(${JSON.stringify(REVEAL_SEL)})).filter(visible)); })()`).catch(() => undefined);
 }
 
 /** Content a user would recognise as "something opened": headings, labelled fields, controls, a dialog. */

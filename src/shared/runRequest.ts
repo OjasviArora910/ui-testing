@@ -32,6 +32,12 @@ export const RunRequestSchema = z.object({
    * `page`: test ONLY the URL exactly as given. Nothing is crawled or queued and the URL is not normalised or rewritten.
    */
   scope: z.enum(['site', 'page']).default('site'),
+  /**
+   * CONTROLLED CREATE MODE, off by default. Only when this is explicitly true, the run is "this page only", AND the
+   * server configuration authorizes a creation workflow for exactly this URL, one test record is created at the end of
+   * the run. In every other case the run is normal QA: nothing is created, saved or submitted.
+   */
+  controlledCreate: z.boolean().default(false),
   viewports: z.array(ViewportSchema).min(1).optional(),
   /** Per-run overrides of qa.config.json (limits only; the merged config is validated again by ConfigSchema). */
   overrides: z.object({

@@ -1,6 +1,8 @@
 import type { Request, Response } from 'playwright';
 import { shellAmong } from '../discovery/shell.js';
+import { exploreState, newExploration, snapshotState } from './explorer.js';
 import { resetPage } from './helpers.js';
+import { rememberControls } from './reversible.js';
 import type { FunctionalContext, FunctionalResult } from './types.js';
 
 /**
@@ -35,7 +37,8 @@ export interface WorkflowPolicy {
 
 const BASE = { kind: 'form' as const, check: 'workflow-create' };
 const MARK = 'data-qa-wf';
-const NEXT = /^(next|continue|proceed)\b/i;
+/** Controls that move a multi-step UI forward without committing anything. */
+const NEXT = /^(next|continue|proceed|go|start|begin|get started)\b/i;
 
 interface Field { id: number; tag: string; type: string; label: string; required: boolean; value: string; options: string[] }
 interface Control { id: number; label: string; path: string }
@@ -132,7 +135,9 @@ export async function runCreationWorkflow(ctx: FunctionalContext, policy: Workfl
   const onResponse = (r: Response): void => { const a = attempts.find((x) => x.req === r.request()); if (a) a.status = r.status(); };
 
   /** Opens the creation UI, fills the minimum and returns the commit control. null (with the reason noted) when it cannot. */
-  const prepare = async (): Promise<{ commit: Control; filled: string[] } | string> => {
+  const prepare = async (explore = false): Promise<{ commit: Control; filled: string[] } | string> => {
+    const stepPush = (r: FunctionalResult): void => { results.push(r); ctx.onResult?.(r); };
+    const run = newExploration();
     if (!(await resetPage(ctx))) return 'the action budget is spent';
     if (!guard.beginWorkflowStep(c.page.url())) return `the browser is on ${c.page.url()}, not on the authorized page`;
     let entries = (await c.page.evaluate(`${ENTRY_SCRIPT}(${JSON.stringify(policy.entryLabels.map((l) => l.toLowerCase()))}, ${JSON.stringify(MARK)})`).catch(() => [])) as (Control & { exact: boolean })[];
@@ -144,13 +149,20 @@ export async function runCreationWorkflow(ctx: FunctionalContext, policy: Workfl
     const g = guard.check({ kind: 'click', name: entry.label, text: entry.label, selector: entry.path });
     if (!g.allowed) return `the creation control "${entry.label}" is not authorized: ${g.reason}`;
     await c.page.evaluate(REMEMBER_SCRIPT).catch(() => undefined);
+    await rememberControls(c); // the root baseline: what follows is the creation UI
     const opened = await c.click({ css: `[${MARK}="e${entry.id}"]` });
     if (!opened.ok) return `the creation control "${entry.label}" could not be clicked: ${opened.error ?? ''}`;
     await c.settle(300); await c.waitForIdle(3000);
     note(`creation control "${entry.label}" clicked (${g.reason})`);
 
     const filled: string[] = [];
-    for (let step = 0; step < 4; step++) {
+    for (let step = 0; step < 6; step++) {
+      // every step of the creation UI is a state: its reversible controls, tabs and expandable parts are explored and
+      // restored before anything is filled in (once, during the probe; the commit pass only repeats the path)
+      if (explore) {
+        const ok = await exploreState(ctx, stepPush, run, [entry.label, `step ${step + 1}`]).catch(() => false);
+        if (!ok) return `step ${step + 1} of the creation UI could not be restored after exploring it`;
+      }
       const ui = (await c.page.evaluate(`${REVEALED_SCRIPT}(${JSON.stringify(MARK)})`).catch(() => null)) as { fields: Field[]; controls: Control[] } | null;
       if (!ui || ui.fields.length + ui.controls.length === 0) return 'the creation control was clicked but no creation UI (fields or buttons) appeared';
       if (step === 0) note(`creation UI opened: ${ui.fields.length} field(s) [${ui.fields.map((f) => `${f.label || f.type}${f.required ? '*' : ''}`).join(', ')}], controls [${ui.controls.map((x) => x.label).join(', ')}]`);
@@ -162,6 +174,7 @@ export async function runCreationWorkflow(ctx: FunctionalContext, policy: Workfl
         let value: string | null = null;
         const isEmail = f.type === 'email' || /e-?mail/i.test(f.label);
         if (f === nameField && !f.value.includes(policy.name)) value = policy.name;
+        else if (texty(f) && f.value === '' && /\b(description|notes?|comments?|summary)\b/i.test(f.label)) value = 'Created by automated UI QA'; // a safe synthetic description
         else if (!f.required || f.value !== '' && f.type !== 'checkbox') continue;
         else if (isEmail) { if (!policy.email) return `the required field "${f.label}" is an email and no test email is authorized`; value = policy.email; }
         else if (f.tag === 'select') { if (f.options.length === 0) continue; value = f.options[0]!; }
@@ -182,12 +195,44 @@ export async function runCreationWorkflow(ctx: FunctionalContext, policy: Workfl
       if (!next) return `no commit control (${policy.commitLabels.join(' / ')}) was found in the creation UI; controls shown: ${ui.controls.map((x) => x.label).join(', ') || 'none'}`;
       const ng = guard.check({ kind: 'click', name: next.label, text: next.label, selector: next.path });
       if (!ng.allowed) return `"${next.label}" is not allowed: ${ng.reason}`;
+      const from = await snapshotState(c);
       const moved = await c.click({ css: `[${MARK}="c${next.id}"]` });
       if (!moved.ok) return `"${next.label}" could not be clicked: ${moved.error ?? ''}`;
       await c.settle(300); await c.waitForIdle(3000);
-      note(`step ${step + 1} done; "${next.label}" clicked`);
+      const to = await snapshotState(c);
+      const advanced = !!from && !!to && to.fingerprint !== from.fingerprint;
+      const el = { selector: `${entry.label} > step ${step + 1} > ${next.label}`, name: next.label };
+      const want = `"${next.label}" moves the creation UI to its next step`;
+      if (!advanced) {
+        // nothing moved: a validation message explains it, or the outcome cannot be established. Either way the workflow stops.
+        const why = to?.messages.length ? `the step did not change and the UI shows: ${to.messages.join(' / ')}` : 'the step did not change and no message explains why';
+        if (explore) stepPush({ kind: 'button', check: 'wizard-next', status: 'inconclusive', severity: 'info', basis: null, element: el, expected: want, actual: `"${next.label}" was clicked; ${why}`, confidence: 'LOW' });
+        return `"${next.label}" did not lead to another step (${why})`;
+      }
+      note(`step ${step + 1} done; "${next.label}" led to the next step${to!.active.length ? ` (active: ${to!.active.join(', ')})` : ''}`);
+      if (explore) {
+        stepPush({ kind: 'button', check: 'wizard-next', status: 'pass', severity: 'info', basis: null, element: el, expected: want, confidence: 'HIGH',
+          actual: `"${next.label}" led from step ${step + 1} to another step: ${to!.controls} control(s)${to!.active.length ? `, active: ${to!.active.join(', ')}` : ''}${to!.headings[0] ? `, "${to!.headings[0]}"` : ''}` });
+        // Back must return to the step just left, and Next must lead forward again
+        const back = to!.navigators.find((n) => n.kind === 'back');
+        if (back && guard.check({ kind: 'click', name: back.label, text: back.label }).allowed) {
+          await c.click({ css: `[data-qa-nav="${back.id}"]` });
+          await c.settle(300); await c.waitForIdle(3000);
+          const returned = await snapshotState(c);
+          const backEl = { selector: `${entry.label} > step ${step + 2} > ${back.label}`, name: back.label };
+          const ok = !!returned && returned.fingerprint === from!.fingerprint;
+          stepPush({ kind: 'button', check: 'wizard-back', status: ok ? 'pass' : 'inconclusive', severity: 'info', basis: null, element: backEl, expected: `"${back.label}" returns to the previous step`, confidence: ok ? 'HIGH' : 'LOW',
+            actual: ok ? `"${back.label}" returned to step ${step + 1} (the same controls as before)` : `after "${back.label}" the UI is not the step that was left (${returned?.controls ?? 0} control(s), active: ${returned?.active.join(', ') || 'none'})` });
+          const fwd = returned?.navigators.find((n) => n.kind === 'next');
+          if (!fwd) return `after "${back.label}" there is no way forward again`;
+          await c.click({ css: `[data-qa-nav="${fwd.id}"]` });
+          await c.settle(300); await c.waitForIdle(3000);
+          const again = await snapshotState(c);
+          if (!again || again.fingerprint !== to!.fingerprint) return `going back and forward again did not return to step ${step + 2}`;
+        }
+      }
     }
-    return 'the creation UI has more steps than the workflow follows (4)';
+    return 'the creation UI has more steps than the workflow follows (6)';
   };
 
   /** Clicks the commit control (through ActionGuard) and returns the write requests that click attempted. */
@@ -212,7 +257,7 @@ export async function runCreationWorkflow(ctx: FunctionalContext, policy: Workfl
     let endpoint = policy.requests[0] ? { method: policy.requests[0].method.toUpperCase(), path: policy.requests[0].path } : null;
     // ---- PROBE: nothing is authorized to leave the browser, so the commit click only shows what it would send
     if (!endpoint) {
-      const ready = await prepare();
+      const ready = await prepare(true);
       if (typeof ready === 'string') return await finish('inconclusive', `The creation workflow stopped before anything was sent: ${ready}`);
       const tried = await commit(ready.commit);
       guard.endWorkflowStep();

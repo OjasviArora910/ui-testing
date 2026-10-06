@@ -26,6 +26,7 @@ export function RunForm({
   onStarted: (runId: string) => void;
 }) {
   const [url, setUrl] = useState('http://127.0.0.1:3000');
+  const [controlledCreate, setControlledCreate] = useState(false);
   const [authChoice, setAuthChoice] = useState<AuthChoice>('none');
   const [token, setToken] = useState<TokenState>(emptyToken);
   const [profile, setProfile] = useState(config.authProfiles[0]?.name ?? '');
@@ -73,6 +74,7 @@ export function RunForm({
       const { runId } = await api.start({
         url: trimmed,
         scope: pageOnly ? 'page' : 'site',
+        ...(pageOnly && controlledCreate ? { controlledCreate: true } : {}),
         mode,
         viewports: [{ name: 'desktop', width: 1440, height: 900 }],
         ...(auth ? { auth } : {}),
@@ -133,6 +135,20 @@ export function RunForm({
             </span>
           </span>
         </label>
+
+        {pageOnly && (
+          <label className="scope-toggle" htmlFor="controlled-create">
+            <input id="controlled-create" type="checkbox" checked={controlledCreate} onChange={(e) => setControlledCreate(e.target.checked)} />
+            <span>
+              <strong>Controlled create mode (creates ONE test record)</strong>
+              <span className="scope-toggle-hint">
+                {controlledCreate
+                  ? 'If the server authorizes a creation workflow for exactly this URL, one record named QA-Autonomous-<run id> is created at the end of the run. It is not deleted afterwards.'
+                  : 'Unchecked: normal QA. Nothing is created, saved or submitted.'}
+              </span>
+            </span>
+          </label>
+        )}
 
         {/* Quick URL Chips */}
         <div className="quick-chips">

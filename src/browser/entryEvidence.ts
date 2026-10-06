@@ -57,13 +57,13 @@ export const ENTRY_HELPERS_JS = `
   };
 
   /** Everything that names the control: its attributes, tooltip, icon child and (short) own text. */
-  const eLabelText = (el) => {
+  const eLabelText = (el, withoutText) => {
     const own = [el.getAttribute('aria-label'), el.getAttribute('title'), el.getAttribute('data-testid'), el.getAttribute('data-test'), el.getAttribute('data-qa'),
       el.getAttribute('name'), el.id, eClass(el)].concat(E_TIPS.map((a) => el.getAttribute(a)))
       .concat(Array.from(el.attributes || []).filter((a) => /click|action|toggle/i.test(a.name)).map((a) => a.value));
     const icons = Array.from(el.children).slice(0, 3).map((k) => [eClass(k), k.getAttribute('title'), k.getAttribute('aria-label'), k.tagName === 'IMG' ? k.getAttribute('alt') : ''].filter(Boolean).join(' '));
     const t = eText(el);
-    return own.concat(icons).concat(t.length <= 40 ? [t] : []).filter(Boolean).join(' ').replace(/[_-]+/g, ' ');
+    return own.concat(icons).concat(!withoutText && t.length <= 40 ? [t] : []).filter(Boolean).join(' ').replace(/[_-]+/g, ' ');
   };
 
   /** The repeated row (table row or ARIA row with at least one sibling row) this element sits in, outside the header. */
@@ -83,15 +83,18 @@ export const ENTRY_HELPERS_JS = `
     if (cs.pointerEvents === 'none' || el.getAttribute('aria-disabled') === 'true' || el.disabled === true) return { reason: 'not operable (disabled or pointer-events none)' };
     const inherited = cs.cursor === 'pointer';
     const label = eLabelText(el);
-    const danger = E_DANGER.test(label);
-    const safe = E_SAFE.exec(label);
+    const declared = Array.from(el.attributes || []).filter((a) => /^(data-action|data-toggle|data-bs-toggle|data-click|ng-click|data-ng-click|v-on:click|@click)$/i.test(a.name)).map((a) => a.value).join(' ').replace(/[_-]+/g, ' ');
+    // what the element SAYS IT DOES (its declared action, class, title, tooltip, icon) versus the text it merely displays
+    const said = declared ? eLabelText(el, true) : label;
+    const danger = E_DANGER.test(said);
+    const safe = E_SAFE.exec(said);
     if (!safe && !danger && !eRowOf(el)) return { reason: inherited ? 'clickable-looking, but nothing indicates that it opens, shows or edits content (ambiguous: not guessed)' : 'no evidence that it is a control' };
     const evidence = eClickEvidence(el, cs);
     if (safe && !danger && (evidence.length > 0 || inherited)) {
       if (el.querySelector(E_INTERACTIVE)) return { reason: 'contains other controls: a container, not a control' };
       const r = el.getBoundingClientRect();
       if (r.width > 420 || r.height > 140) return { reason: 'too large to be a single control' };
-      return { kind: 'labelled', name: safe[2].replace(/^(detail|setting)s$/i, '$1'), evidence: evidence.length ? evidence : ['pointer cursor'] };
+      return { kind: 'labelled', name: safe[2].replace(/^(detail|setting)s$/i, '$1'), action: safe[2].toLowerCase(), evidence: evidence.length ? evidence : ['pointer cursor'] };
     }
     if (danger) return { reason: 'its label names a destructive or mutating action: never selected' };
     if (evidence.length === 0) return { reason: inherited ? 'pointer cursor only inherited from a parent, and no open/view/edit indication' : 'no evidence that it is clickable' };
@@ -100,7 +103,7 @@ export const ENTRY_HELPERS_JS = `
       const t = eText(el);
       if (t && t.length <= 80 && !el.querySelector(E_INTERACTIVE) && !E_DANGER.test(t)) {
         const first = Array.from(row.querySelectorAll('td, [role=cell], [role=gridcell]')).find((c) => eText(c));
-        if (first && (first === el || first.contains(el))) return { kind: 'row', name: t, evidence: evidence.concat(['primary label of a repeated row']) };
+        if (first && (first === el || first.contains(el))) return { kind: 'row', name: t, action: 'open', evidence: evidence.concat(['primary label of a repeated row']) };
         return { reason: 'clickable text in a row, but not the row\\'s primary label and no open/view/edit indication' };
       }
     }

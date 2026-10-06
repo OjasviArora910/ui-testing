@@ -562,7 +562,7 @@ export class RunExecutor {
   /** Detection -> selection for one page. The decision is persisted and streamed so the report and dashboard can show it. */
   /** The controlled creation authorized for exactly this page, if any (config `workflows`); only in "this page only" runs. */
   private workflowFor(url: string): import('../functional/workflow.js').WorkflowPolicy | undefined {
-    if (this.request.scope !== 'page') return undefined;
+    if (this.request.scope !== 'page' || this.request.controlledCreate !== true) return undefined; // normal QA: never
     const same = (a: string, b: string): boolean => { try { return new URL(a).toString() === new URL(b).toString(); } catch { return false; } };
     const w = (this.config.workflows ?? []).find((x) => same(x.page, url) && same(x.page, this.request.url));
     if (!w) return undefined;

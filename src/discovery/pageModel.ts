@@ -61,7 +61,7 @@ export async function buildPageModel(controller: BrowserController, opts: { stat
   const interactive = await controller.interactiveElements();
   for (const e of interactive) {
     const type = classifyInteractive(e);
-    const me = fromInfo(type, e, { tag: e.tag, inputType: e.type ?? null, className: e.className || null, ...(e.entry ? { entry: e.entry.kind, entryEvidence: e.entry.evidence.join('; ') } : {}) });
+    const me = fromInfo(type, e, { tag: e.tag, inputType: e.type ?? null, className: e.className || null, ...(e.entry ? { entry: e.entry.kind, entryAction: e.entry.action, entryEvidence: e.entry.evidence.join('; ') } : {}) });
     model.interactive.push(me);
     const bucket = ({ button: model.buttons, link: model.links, input: model.inputs, select: model.selects, checkbox: model.checkboxes, radio: model.radios, textarea: model.textareas } as Record<string, ModelElement[] | undefined>)[type];
     bucket?.push(me);

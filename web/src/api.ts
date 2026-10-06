@@ -113,7 +113,7 @@ export const api = {
   config: () => req<PlatformConfig>('/api/config'),
   runs: () => req<{ runs: Run[] }>('/api/runs').then((r) => r.runs),
   run: (id: string) => req<Run>(`/api/runs/${id}`),
-  start: (body: { url: string; scope?: 'site' | 'page'; auth?: DirectAuth; authProfile?: string; mode: Mode; viewports: Viewport[]; overrides?: Record<string, unknown> }) => req<{ runId: string }>('/api/runs', { method: 'POST', body: JSON.stringify(body) }),
+  start: (body: { url: string; scope?: 'site' | 'page'; controlledCreate?: boolean; auth?: DirectAuth; authProfile?: string; mode: Mode; viewports: Viewport[]; overrides?: Record<string, unknown> }) => req<{ runId: string }>('/api/runs', { method: 'POST', body: JSON.stringify(body) }),
   stop: (id: string) => req<{ stopped: boolean }>(`/api/runs/${id}/stop`, { method: 'POST', body: '{}' }),
   resume: (id: string, auth?: DirectAuth) => req<{ runId: string }>(`/api/runs/${id}/resume`, { method: 'POST', body: JSON.stringify(auth ? { auth } : {}) }),
   findings: (id: string) => req<{ findings: Finding[] }>(`/api/runs/${id}/findings`).then((r) => r.findings),

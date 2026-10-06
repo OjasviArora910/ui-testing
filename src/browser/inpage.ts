@@ -85,7 +85,7 @@ export const COLLECT_ELEMENTS_SCRIPT = `(mode) => {
       styles,
       scroll: { scrollWidth: el.scrollWidth, clientWidth: el.clientWidth, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight },
       href: tag === 'a' ? el.getAttribute('href') : undefined,
-      entry: (mode === 'interactive' && !el.matches(INTERACTIVE_SEL) && entryOf(el, cs).kind) ? { kind: entryOf(el, cs).kind, evidence: entryOf(el, cs).evidence } : undefined,
+      entry: (mode === 'interactive' && !el.matches(INTERACTIVE_SEL) && entryOf(el, cs).kind) ? { kind: entryOf(el, cs).kind, action: entryOf(el, cs).action, evidence: entryOf(el, cs).evidence } : undefined,
       required: el.required === true || undefined,
     });
     if (out.length >= 5000) break;

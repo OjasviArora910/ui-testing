@@ -2,8 +2,9 @@ import { elementOf, resetPage, targetFor } from './helpers.js';
 import { classifyElementIntent, toClassifiable } from './intent.js';
 import { clickAndObserve, notInteractable, prepareInteraction } from './interact.js';
 import { capturePreActionSnapshot, traceOf } from './observer.js';
+import { closeRevealed, exploreState, newExploration } from './explorer.js';
 import { closeOpenedDialog } from './modal.js';
-import { rememberControls, revealedContent, testReversibleControls } from './reversible.js';
+import { rememberControls, revealedContent } from './reversible.js';
 import type { FunctionalContext, FunctionalResult } from './types.js';
 import { verifyInteraction } from './verifier.js';
 
@@ -28,7 +29,10 @@ export async function testButtons(ctx: FunctionalContext): Promise<FunctionalRes
     const intent = classifyElementIntent(toClassifiable(b), model);
 
     // 0. Safety Guard check
-    const decision = guard.check({ kind: 'click', name: b.name, text: b.text, selector: b.selector, role: b.role ?? undefined, href: b.href });
+    const entryAction = typeof b.meta?.entryAction === 'string' ? b.meta.entryAction : null;
+    const decision = entryAction
+      ? guard.check({ kind: 'click', name: entryAction, role: 'entry' })
+      : guard.check({ kind: 'click', name: b.name, text: b.text, selector: b.selector, role: b.role ?? undefined, href: b.href });
     if (!decision.allowed) {
       ctx.onAction?.({
         phase: 'RESULT',
@@ -271,10 +275,17 @@ export async function testButtons(ctx: FunctionalContext): Promise<FunctionalRes
     // 8. What the click revealed (a dialog, a panel, an editor): its safe, reversible controls are tested in place and
     // each is put back as it was. No button or link in there is clicked, so nothing is saved or confirmed.
     if (ctx.plan && res.ok && outcome.verdict !== 'BLOCKED' && outcome.verdict !== 'FAIL' && c.page.url() === pre.rawUrl) {
-      const n = await testReversibleControls(ctx, push, { onlyNew: true, openedBy: label }).catch(() => 0);
-      if (n > 0) pristine = false;
+      // The revealed UI is a state: its reversible controls are tested and restored, and its tabs, expandable sections and
+      // menus are followed to the states they lead to (bounded, de-duplicated), each restored afterwards.
+      const run = newExploration();
+      await exploreState(ctx, push, run, [label]).catch(() => false);
+      if (run.visited.size > 0) {
+        pristine = false;
+        ctx.onAction?.({ type: 'explored', target: label, ok: true, detail: `${run.visited.size} state(s): ${run.states.join(' | ').slice(0, 600)}` });
+      }
       // a dialog that this click opened is then closed with its own close control, and the closing is verified
       if ((shown?.dialog || observation.dialogs.opened.length > 0) && (await closeOpenedDialog(ctx, label, el, push).catch(() => false))) pristine = false;
+      else if (run.visited.size > 0) await closeRevealed(ctx).catch(() => false);
     }
   }
   return results;

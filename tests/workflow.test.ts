@@ -70,7 +70,7 @@ describe('controlled creation workflow (browser)', () => {
   const open: { server: http.Server; platform?: Platform }[] = [];
   afterAll(async () => { for (const o of open) { await o.platform?.orchestrator.shutdown(); o.server.closeAllConnections?.(); await new Promise((r) => o.server.close(() => r(undefined))); } });
 
-  async function run(mode: Mode, opts: { authorize: boolean; scope?: 'page' | 'site'; otherPage?: boolean } = { authorize: true }) {
+  async function run(mode: Mode, opts: { authorize: boolean; scope?: 'page' | 'site'; otherPage?: boolean; flag?: boolean } = { authorize: true }) {
     const site = await startSite(mode);
     const exact = `${site.url}/#setup/roles`;
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-wf-'));
@@ -83,7 +83,7 @@ describe('controlled creation workflow (browser)', () => {
       provider: null, trace: false, env: {},
     });
     open.push({ server: site.server, platform });
-    const started = platform.orchestrator.start({ url: exact, scope: opts.scope ?? 'page', mode: 'deterministic' } as Parameters<typeof platform.orchestrator.start>[0]);
+    const started = platform.orchestrator.start({ url: exact, scope: opts.scope ?? 'page', mode: 'deterministic', controlledCreate: opts.flag ?? true } as Parameters<typeof platform.orchestrator.start>[0]);
     const done = await platform.orchestrator.whenDone(started.id);
     const db = platform.orchestrator.db;
     const results = db.listTestResults(started.id);
@@ -103,7 +103,7 @@ describe('controlled creation workflow (browser)', () => {
     // seen from the server: one creation, with the test name, and no other write of any kind
     expect(r.site.hits['POST /api/SaveRoleDefinition']).toBe(1);
     expect(r.site.roles.filter((n) => n === r.name)).toHaveLength(1);
-    expect(JSON.parse(r.site.bodies[0]!)).toMatchObject({ roleName: r.name, description: '', preset: '0' }); // only the minimum was filled
+    expect(JSON.parse(r.site.bodies[0]!)).toMatchObject({ roleName: r.name, description: 'Created by automated UI QA', preset: '0' }); // the name, a synthetic description, nothing else
     expect(r.site.bodies.join('')).not.toContain('revclerx'); // no email field: the email is not forced into the form
     expect(writes(r.site.hits)).toEqual(['POST /api/SaveRoleDefinition']);
     expect(r.site.hits['DELETE /api/roles/1']).toBeUndefined();
@@ -112,8 +112,8 @@ describe('controlled creation workflow (browser)', () => {
     expect(r.findings.filter((f) => f.resultClass === 'BUG')).toEqual([]);
   }, 240_000);
 
-  it('without an authorization for exactly this page, nothing is created: none, another page, or a whole-site run', async () => {
-    for (const opts of [{ authorize: false }, { authorize: true, otherPage: true }, { authorize: true, scope: 'site' as const }]) {
+  it('nothing is created unless ALL hold: an authorization for exactly this page, a page-only run, and controlled create mode switched on for the run', async () => {
+    for (const opts of [{ authorize: false }, { authorize: true, otherPage: true }, { authorize: true, scope: 'site' as const }, { authorize: true, flag: false }]) {
       const r = await run('ok', opts);
       expect(r.wf, JSON.stringify(opts)).toEqual([]);
       expect(writes(r.site.hits), JSON.stringify(opts)).toEqual([]);

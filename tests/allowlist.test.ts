@@ -46,12 +46,16 @@ describe('request allow-list: deny by default, exact entries only', () => {
       { origin: 'https://main.dvl.amp.vg', method: 'POST', path: '/api/GetFiltersForImages' },
       { origin: 'https://main.dvl.amp.vg', method: 'POST', path: '/api/GetImagesForCurrentUser' },
       { origin: 'https://main.dvl.amp.vg', method: 'POST', path: '/api/GetRoles' },
+      { origin: 'https://main.dvl.amp.vg', method: 'POST', path: '/api/GetRolesData' },
     ]);
     const shipped = new ActionGuard({ keywords: config.dangerousActions.keywords, allowMethods: config.dangerousActions.allowMethods, origin: 'https://main.dvl.amp.vg', allowedRequests: config.network.allowedRequests });
     expect(shipped.rejectedAllowRules).toEqual([]);
     // the Roles page data endpoint, exactly; look-alikes, other methods and anything that changes roles stay blocked
     const A = 'https://main.dvl.amp.vg';
     expect(shipped.checkRequest({ method: 'POST', url: `${A}/api/GetRoles` })).toBe(true);
+    expect(shipped.checkRequest({ method: 'POST', url: `${A}/api/GetRolesData` })).toBe(true); // loads the editor of an existing role
+    for (const p of ['/api/GetRolesDataForUser', '/api/GetRolesData/1', '/api/SaveRolesData', '/api/UpdateRolesData', '/api/DeleteRolesData']) expect(shipped.checkRequest({ method: 'POST', url: `${A}${p}` }), p).toBe(false);
+    expect(shipped.checkRequest({ method: 'DELETE', url: `${A}/api/GetRolesData` })).toBe(false);
     for (const [method, url] of [
       ['POST', `${A}/api/GetRole`], ['POST', `${A}/api/GetRolesForUser`], ['POST', `${A}/api/getroles`], ['POST', `${A}/api/GetRoles/1`],
       ['PUT', `${A}/api/GetRoles`], ['DELETE', `${A}/api/GetRoles`], ['POST', 'https://other.test/api/GetRoles'],

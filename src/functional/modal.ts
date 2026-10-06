@@ -1,7 +1,8 @@
 import { elementOf, resetPage, targetFor } from './helpers.js';
 import { classifyElementIntent, toClassifiable } from './intent.js';
 import { clickAndObserve, notInteractable, prepareInteraction } from './interact.js';
-import { rememberControls, testReversibleControls } from './reversible.js';
+import { exploreState, newExploration } from './explorer.js';
+import { rememberControls } from './reversible.js';
 import { capturePreActionSnapshot, traceOf } from './observer.js';
 import type { FunctionalContext, FunctionalResult } from './types.js';
 import { verifyInteraction } from './verifier.js';
@@ -115,7 +116,7 @@ export async function testModals(ctx: FunctionalContext): Promise<FunctionalResu
     if (opened.open <= before.open) continue; // a menu/popup rather than a dialog: nothing to close
 
     // ---- inside the dialog: its safe, reversible controls are tested and put back as they were. No button in it is clicked.
-    if (c.page.url() === pre.rawUrl) await testReversibleControls(ctx, push, { onlyNew: true, openedBy: label }).catch(() => 0);
+    if (c.page.url() === pre.rawUrl) await exploreState(ctx, push, newExploration(), [label]).catch(() => false);
 
     // ---- close: with the dialog's own close control. Keyboard behaviour is not part of UI/UX testing: Escape is only
     // pressed afterwards, if the dialog has no close control, to leave the page clean. It never produces a result.

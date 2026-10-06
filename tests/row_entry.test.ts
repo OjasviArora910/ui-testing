@@ -136,7 +136,8 @@ for (const id of ['notify', 'lock']) document.getElementById(id).addEventListene
     expect(order.some((o) => o.startsWith('click:') && /create/i.test(o))).toBe(false);
     // every real click on a planned control was preceded by an allowing guard decision for that control
     for (const b of plan.buttons.filter((x) => x.element.name !== 'Create')) {
-      const g = order.indexOf(`guard:${b.element.name}:allowed`);
+      // an entry control is judged on what it DOES (open / view / edit ...), not on the data it displays
+      const g = order.indexOf(`guard:${typeof b.element.meta?.entryAction === 'string' ? b.element.meta.entryAction : b.element.name}:allowed`);
       expect(g, `${b.element.name}\n${order.join('\n')}`).toBeGreaterThanOrEqual(0);
     }
     expect(order.findIndex((o) => o.startsWith('click:'))).toBeGreaterThan(order.findIndex((o) => o.startsWith('guard:')));

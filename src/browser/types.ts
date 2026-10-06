@@ -24,7 +24,7 @@ export interface ElementInfo {
   scroll: { scrollWidth: number; clientWidth: number; scrollHeight: number; clientHeight: number };
   href?: string | null;
   /** Set on a non-semantic element recognised as a safe entry control (opens, shows or edits content), with the evidence for it. */
-  entry?: { kind: 'labelled' | 'row'; evidence: string[] };
+  entry?: { kind: 'labelled' | 'row'; /** What it does (open, view, edit...): the ACTION, as opposed to the data it displays. */ action: string; evidence: string[] };
   required?: boolean;
 }
 
