@@ -26,6 +26,18 @@ const BUFFER = 300;
  * Central run lifecycle manager: start / resume / abort / timeout / budgets / cleanup, progress events, and the
  * human-review entry points. All run state lives in SQLite, so any non-terminal run can be resumed after a restart.
  */
+/**
+ * A token is registered as a secret and removed from everything that is stored, the run's own URL included. A URL entered
+ * where the token belongs would therefore turn the page URL into "[REDACTED]" for this run and for every later run of
+ * this server ("Invalid URL" before a browser even starts). A URL is not a credential: refuse it before it is registered.
+ */
+function assertTokenIsNotAUrl(token: string, pageUrl: string): void {
+  const t = token.trim();
+  if (/^https?:\/\//i.test(t) || (t.length > 0 && t === pageUrl.trim())) {
+    throw new Error('The access token field contains a URL, not a token. Enter the page address in the URL field and the token value (for example the value of the session cookie) in the token field.');
+  }
+}
+
 export class Orchestrator {
   readonly events = new EventEmitter();
   private readonly active = new Map<string, ActiveRun>();
@@ -44,7 +56,7 @@ export class Orchestrator {
    */
   start(request: RunRequest): RunRecord {
     const auth = request.auth ? directAuthToConfig(request.auth) : undefined;
-    if (auth) { this.opts.redactor.register(auth.jwt); AuthConfigSchema.parse(auth); }
+    if (auth) { assertTokenIsNotAUrl(auth.jwt, request.url); this.opts.redactor.register(auth.jwt); AuthConfigSchema.parse(auth); }
     if (this.active.size >= (this.opts.maxConcurrentRuns ?? 1)) throw new Error('Another run is already in progress');
     if (request.authProfile && !this.opts.profiles.has(request.authProfile)) throw new Error(`Unknown auth profile "${request.authProfile}"`);
     const overrides: Record<string, unknown> = { ...(request.overrides ?? {}) };
@@ -65,7 +77,7 @@ export class Orchestrator {
     if (this.active.size >= (this.opts.maxConcurrentRuns ?? 1)) throw new Error('Another run is already in progress');
     const persisted = run.request as PersistedRunRequest;
     const auth = directAuth ? directAuthToConfig(directAuth) : undefined;
-    if (auth) this.opts.redactor.register(auth.jwt);
+    if (auth) { assertTokenIsNotAUrl(auth.jwt, run.url); this.opts.redactor.register(auth.jwt); }
     if (persisted.authSource === 'token' && !auth) throw new Error('This run used a one-time token, which is never stored. Provide the token again to resume it.');
     this.launch(runId, auth);
     return run;

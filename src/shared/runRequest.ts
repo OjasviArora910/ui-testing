@@ -27,6 +27,11 @@ export const RunRequestSchema = z.object({
   auth: DirectAuthSchema.optional(),
   authProfile: z.string().min(1).optional(),
   mode: TestModeSchema.default('deterministic'),
+  /**
+   * `site` (default): crawl same-origin pages from the URL and test each one.
+   * `page`: test ONLY the URL exactly as given. Nothing is crawled or queued and the URL is not normalised or rewritten.
+   */
+  scope: z.enum(['site', 'page']).default('site'),
   viewports: z.array(ViewportSchema).min(1).optional(),
   /** Per-run overrides of qa.config.json (limits only; the merged config is validated again by ConfigSchema). */
   overrides: z.object({

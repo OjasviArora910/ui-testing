@@ -53,6 +53,7 @@ async function fillForm(ctx: FunctionalContext, form: RawForm, override?: { sele
 async function submitAndObserve(ctx: FunctionalContext, form: RawForm): Promise<SubmitObservation | null> {
   const c = ctx.controller;
   if (!ctx.budget.consume()) return null;
+  c.beginAction(); // requests from here on are caused by this submission, not by the page loading
   const n0 = c.events.network.length; const k0 = c.events.console.length; const b0 = c.blockedRequests.length;
   const textBefore = await pageText(ctx); const sigBefore = await domSignature(ctx);
   const urlBefore = c.page.url();
@@ -72,10 +73,10 @@ async function submitAndObserve(ctx: FunctionalContext, form: RawForm): Promise<
     return { gone: false, invalid: !f.noValidate && bad.length > 0, messages: bad.map(e => e.validationMessage).filter(Boolean), aria: f.querySelectorAll('[aria-invalid="true"]').length + document.querySelectorAll('[role=alert]').length };
   })(${JSON.stringify(form.selector)})`) as { gone: boolean; invalid: boolean; messages: string[]; aria: number };
 
-  const net = c.events.network.slice(n0); const con = c.events.console.slice(k0);
+  const net = c.events.network.slice(n0).filter((n) => n.phase !== 'page-load'); const con = c.events.console.slice(k0);
   const doc = net.filter((n) => n.resourceType === 'document').pop();
   const navigated = c.page.url() !== urlBefore;
-  const blockedByGuard = c.blockedRequests.slice(b0).map((b) => `${b.method} ${b.url}`);
+  const blockedByGuard = c.blockedRequests.slice(b0).filter((b) => b.phase === 'action').map((b) => `${b.method} ${b.url}`);
   const feedbackText = newLines(textBefore, await pageText(ctx)).filter((l) => VALIDATION_TEXT.test(l));
   const trace: ActionTrace = {
     action: `submit form "${form.name || form.selector}"`, urlBefore, urlAfter: c.page.url(),
@@ -84,7 +85,7 @@ async function submitAndObserve(ctx: FunctionalContext, form: RawForm): Promise<
     changes: [...(navigated ? [`url: ${urlBefore} -> ${c.page.url()}`] : []), ...info.messages.map((m) => `validation: ${m}`), ...feedbackText.map((t) => `feedback text: ${t}`)],
   };
   return {
-    attempted: c.blockedRequests.length > b0 || net.some((n) => n.method !== 'GET') || navigated,
+    attempted: blockedByGuard.length > 0 || net.some((n) => n.method !== 'GET') || navigated,
     navigated, nativeBlocked: info.invalid, validationMessages: info.messages,
     feedbackText,
     invalidAria: info.aria,

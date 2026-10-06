@@ -4,7 +4,7 @@ import type { DynamicData, ResultClass } from '../api';
 const pathOf = (u: string) => {
   try {
     const x = new URL(u);
-    return x.pathname + x.search;
+    return x.pathname + x.search + x.hash;
   } catch {
     return u;
   }
@@ -12,12 +12,12 @@ const pathOf = (u: string) => {
 
 const CLASS_ORDER: ResultClass[] = ['BUG', 'WARNING', 'NEEDS_REVIEW', 'BLOCKED_BY_SAFETY', 'EXPECTED', 'INCONCLUSIVE'];
 export const CLASS_LABEL: Record<ResultClass, string> = {
-  BUG: 'Bug',
-  WARNING: 'Warning',
-  EXPECTED: 'Passed',
-  NEEDS_REVIEW: 'Needs review',
-  BLOCKED_BY_SAFETY: 'Blocked by safety',
-  INCONCLUSIVE: 'No effect seen',
+  BUG: 'Confirmed bug',
+  WARNING: 'Confirmed bug',
+  EXPECTED: 'Pass',
+  NEEDS_REVIEW: 'Inconclusive',
+  BLOCKED_BY_SAFETY: 'Blocked (safety)',
+  INCONCLUSIVE: 'Inconclusive',
 };
 
 function uniq<T extends { label: string; reason: string }>(list: T[]): T[] {

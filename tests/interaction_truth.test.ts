@@ -42,7 +42,7 @@ const WORKING = `<!doctype html><html lang="en"><head><title>Working with noise<
 
 <section><button type="button" id="restless" class="restless">Add to list</button> <span id="added">0 items</span></section>
 
-<section><button type="button" id="save-view">Save view</button> <span id="saved">Not saved</span></section>
+<section><button type="button" id="refresh-view">Refresh view</button> <span id="saved">Not saved</span></section>
 
 <script>
 const $ = (s) => document.querySelector(s);
@@ -50,7 +50,7 @@ const $ = (s) => document.querySelector(s);
 fetch('/telemetry/boot.json').catch(() => {});
 setTimeout(() => { throw new Error('boot analytics failed'); }, 0);
 // the control works, and also sends a request that 404s
-$('#save-view').addEventListener('click', () => { $('#saved').textContent = 'Saved'; fetch('/telemetry/click.json').catch(() => {}); });
+$('#refresh-view').addEventListener('click', () => { $('#saved').textContent = 'Saved'; fetch('/telemetry/click.json').catch(() => {}); });
 // the dropdown opens, and a second, unrelated listener on the same click throws
 $('#nav-menu').addEventListener('click', (e) => { e.preventDefault(); $('#nav-drop').hidden = !$('#nav-drop').hidden; });
 $('#nav-menu').addEventListener('click', (e) => { document.querySelector(e.currentTarget.getAttribute('href')); });
@@ -156,7 +156,7 @@ describe('the verdict comes from the UI result, not from console errors or brows
     }, 60_000);
 
     it('1d. a control that works is EXPECTED although the request it also sends returns 404', () => {
-      const save = of(r, /Save view/);
+      const save = of(r, /Refresh view/);
       expect(save.map((x) => classifyResult(x)), say(save)).toEqual(['EXPECTED']);
       expect(diagnostics(save[0]!)).toMatch(/request: GET .*click\.json returned HTTP 404/);
     });
@@ -212,9 +212,9 @@ describe('the verdict comes from the UI result, not from console errors or brows
       expect(under[0]!.actual).not.toMatch(/Timeout|exceeded/i);
     });
 
-    it('5b. a button under floating UI (a banner) cannot be judged automatically: NEEDS_REVIEW', () => {
+    it('5b. a button under floating UI (a banner) cannot be judged automatically: INCONCLUSIVE, never a bug', () => {
       const chat = of(r, /Start chat/);
-      expect(chat.map((x) => [x.check, classifyResult(x)]), say(chat)).toEqual([['clickable', 'NEEDS_REVIEW']]);
+      expect(chat.map((x) => [x.check, classifyResult(x)]), say(chat)).toEqual([['clickable', 'INCONCLUSIVE']]);
       expect(chat[0]!.actual).toMatch(/floating\/overlay UI/);
     });
 

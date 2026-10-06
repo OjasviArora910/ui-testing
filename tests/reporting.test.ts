@@ -7,7 +7,7 @@ import { generateReports } from '../src/reporting/index.js';
 import { Redactor } from '../src/shared/redactor.js';
 import type { Finding } from '../src/shared/types.js';
 
-const f = (o: Partial<Finding>): Finding => ({ ruleId: 'r', category: 'layout', severity: 'major', classification: 'defect', basis: 'deterministic', page: 'http://app.test/', viewport: 'desktop', element: null, expected: 'e', actual: 'a', evidence: [], ...o });
+const f = (o: Partial<Finding>): Finding => ({ ruleId: 'r', category: 'layout', severity: 'major', classification: 'defect', basis: 'deterministic', page: 'http://app.test/', viewport: 'desktop', element: null, expected: 'e', actual: 'a', evidence: ['ev_1'], ...o });
 
 describe('reports', () => {
   it('writes HTML, JSON and JUnit with the verdict; escapes page content', () => {
@@ -37,10 +37,10 @@ describe('reports', () => {
     expect(xml).toContain('name="a11y.axe"'); // rule without findings => passing testcase
     expect(xml).not.toContain('<script>');
 
-    // human dismisses the defect and confirms nothing else => verdict becomes BLOCKED (anomaly still pending)
+    // human dismisses the defect => no confirmed bug is left. The remaining anomaly is an observation, not a bug: it does not block the verdict
     const defectId = db.listFindings(run.id).find((x) => x.classification === 'defect')!.id;
     db.addDecision({ findingId: defectId, decision: 'NOT_A_BUG', decidedBy: 'qa' });
-    expect(generateReports(db, undefined, run.id, dir).data.run.verdict).toBe('BLOCKED_PENDING_REVIEW');
+    expect(generateReports(db, undefined, run.id, dir).data.run.verdict).toBe('PASS');
     db.addDecision({ findingId: anomaly.id, decision: 'EXPECTED_BEHAVIOR', decidedBy: 'qa' });
     expect(generateReports(db, undefined, run.id, dir).data.run.verdict).toBe('PASS');
   });

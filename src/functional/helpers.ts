@@ -20,7 +20,8 @@ export async function resetPage(ctx: FunctionalContext): Promise<boolean> {
   if (!ctx.budget.consume()) return false;
   const r = await ctx.controller.navigate(ctx.pageUrl);
   ctx.onAction?.({ type: 'navigate', target: ctx.pageUrl, ok: r.ok, detail: r.error });
-  await ctx.controller.settle(120);
+  // the page must have finished loading its data again before anything is clicked, or its load requests would be blamed on the click
+  await ctx.controller.waitForPageLoad();
   return r.ok;
 }
 

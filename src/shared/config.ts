@@ -83,7 +83,17 @@ export const ConfigSchema = z.object({
     /** Spacing/alignment/duplicate heuristics among similar siblings. Geometry-only hints, never defects: off by default. */
     consistencyChecks: z.boolean().default(false),
   }).default({ enabled: true, maxGenericButtons: 300, consistencyChecks: false }),
-  network: z.object({ slowRequestMs: z.number().int().positive().default(3000) }).default({ slowRequestMs: 3000 }),
+  network: z.object({
+    slowRequestMs: z.number().int().positive().default(3000),
+    /** Other origins the application under test needs to talk to (e.g. its API host). Static files (scripts, styles, images, fonts) from any host are always loaded; write methods to any host stay blocked. */
+    allowedOrigins: z.array(z.string().url()).default([]),
+    /**
+     * Read-only data endpoints that are called with a write method (e.g. POST) and are therefore blocked by default. Each
+     * entry is ONE exact origin + method + path; there are no wildcards. Everything not listed stays blocked, and a path
+     * that looks like it changes or removes something is refused even if it is listed.
+     */
+    allowedRequests: z.array(z.object({ origin: z.string().url(), method: z.string().min(1), path: z.string().min(2) })).default([]),
+  }).default({ slowRequestMs: 3000, allowedOrigins: [], allowedRequests: [] }),
   geometry: z.object({
     minTargetSize: z.number().positive().default(24),
     overlapMinRatio: z.number().min(0).max(1).default(0.2),
@@ -104,6 +114,23 @@ export const ConfigSchema = z.object({
     noProgressLimit: z.number().int().positive().default(5),
     maxLlmCalls: z.number().int().positive().default(30),
   }).default({ maxActions: 25, maxPages: 5, maxDepth: 3, maxRuntimeMs: 180000, maxRepeatedActions: 3, maxRepeatedStates: 3, noProgressLimit: 5, maxLlmCalls: 30 }),
+  /**
+   * Controlled mutation workflows. EMPTY by default: nothing is ever created, saved or submitted unless an entry here
+   * authorizes it for ONE exact page. An entry allows exactly one creation per run through the page's own UI. It can
+   * never authorize a destructive action or a DELETE request (ActionGuard refuses those whatever is written here).
+   */
+  workflows: z.array(z.object({
+    /** The exact page URL (hash route included). The workflow runs only when a "this page only" run is started on exactly this URL. */
+    page: z.string().url(),
+    entryLabels: z.array(z.string().min(1)).default(['create', 'add', 'new']),
+    commitLabels: z.array(z.string().min(1)).default(['save', 'create']),
+    /** Prefix of the single test record's name; the run id is appended. */
+    namePrefix: z.string().min(3).default('QA-Autonomous-'),
+    /** Used only if the creation UI has a required email field. */
+    email: z.string().email().optional(),
+    /** Exact endpoints approved beforehand. Empty: identified by a probe in which nothing leaves the browser. */
+    requests: z.array(z.object({ method: z.string().min(1), path: z.string().min(2) })).default([]),
+  })).default([]),
   paths: z.object({
     dataDir: z.string().default('data'),
     baselineDir: z.string().default('data/baselines'),

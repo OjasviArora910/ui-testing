@@ -1,3 +1,4 @@
+import type { RowCandidate } from '../browser/types.js';
 import type { BoundingBox, Viewport } from '../shared/types.js';
 import type { RawForm } from '../browser/types.js';
 
@@ -49,6 +50,8 @@ export interface PageModel {
   /** Every interactive element, regardless of type. */
   interactive: ModelElement[];
   counts: Record<string, number>;
+  /** Clickable-looking elements in table rows, with the evidence and the decision for each: why a row control was or was not tested. */
+  rowCandidates?: RowCandidate[];
 }
 
 export interface CrawlQueueItem { url: string; depth: number }

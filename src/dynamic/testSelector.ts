@@ -29,6 +29,14 @@ function groupOf(kind: SemanticIntentKind, label: string, hasTable: boolean): Co
 /** Identity of a control across pages: the same selector with the same name is the same shared control (header, navigation, footer). */
 export const controlKey = (el: { selector: string; name?: string; text?: string }): string => `${el.selector}|${(el.name || el.text || '').slice(0, 80)}`;
 
+/** A non-semantic element the discovery recognised as a safe entry control (evidence of clickability AND of what it opens). */
+function isSafeEntryControl(el: ModelElement): boolean {
+  return el.type === 'interactive' && el.visible && el.enabled && typeof el.meta?.entry === 'string';
+}
+
+/** Rows repeat: the same control in every row is one kind of control. Identity of that kind: its path with positions removed. */
+const repeatKey = (el: ModelElement): string => `${String(el.meta?.entry)}|${el.selector.replace(/:nth-of-type\(\d+\)/g, '')}`;
+
 export interface SelectOptions {
   /** Controls already verified on an earlier page of this run. They are tested once, not again on every page. */
   verified?: ReadonlySet<string>;
@@ -100,7 +108,7 @@ export function selectTests(profile: PageProfile, model: PageModel, config: QACo
     if (t.confidence === 'LOW') { skip('modal', 'Modal open/close', `"${name}" looks like a modal trigger but no dialog exists in the DOM (low confidence)`); continue; }
     plan.modals.push({ trigger: t.element, scenario: select('modal', 'Modal open/close', 'MODAL_DIALOG', `trigger "${name}"${t.element.aria?.haspopup ? ' declares aria-haspopup' : ''} and a dialog exists`, t.confidence) });
   }
-  if (triggers.length === 0) skip('modal', 'Modal open/close', model.dialogs.length > 0 ? 'a dialog exists but no trigger for it was identified' : 'no modal/dialog detected');
+  if (triggers.length === 0) skip('modal', 'Modal open/close', model.dialogs.length > 0 ? 'no control declares that it opens a dialog; a dialog that opens when a control is clicked is tested at that moment (opened, its safe controls exercised and restored, closed)' : 'no modal/dialog detected');
 
   // ---- remaining clickable controls, grouped by inferred intent
   const taken = new Set<string>([
@@ -117,7 +125,10 @@ export function selectTests(profile: PageProfile, model: PageModel, config: QACo
   const customToggles = model.checkboxes.filter((x) => x.meta?.tag !== 'input');
   // anchors used as buttons (href="#" or javascript:) have no destination to check: they are controls to click
   const scriptLinks = model.links.filter((l) => { const h = (l.href ?? '').trim(); return h === '' || /#$/.test(h) || /^javascript:/i.test(h); });
-  for (const el of [...model.buttons, ...model.tabs, ...customToggles, ...scriptLinks]) {
+  // one of each kind of row entry control is opened (the first row's): every row has the same one
+  const entryKinds = new Set<string>();
+  const entryControls = model.interactive.filter(isSafeEntryControl).filter((el) => { const k = repeatKey(el); if (entryKinds.has(k)) return false; entryKinds.add(k); return true; });
+  for (const el of [...model.buttons, ...model.tabs, ...customToggles, ...scriptLinks, ...entryControls]) {
     if (taken.has(el.selector) || seen.has(el.selector) || !el.visible) continue;
     seen.add(el.selector);
     if ((el.name || el.text) && opts.verified?.has(controlKey(el))) { shared++; continue; }

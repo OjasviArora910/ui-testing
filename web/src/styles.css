@@ -4332,3 +4332,31 @@ a:hover {
 .status-pill.status-running { background: rgba(59, 130, 246, 0.16); color: #93c5fd; }
 .status-pill.status-aborted, .status-pill.status-interrupted { background: rgba(245, 158, 11, 0.16); color: #fbbf24; }
 .rc-INCONCLUSIVE { background: rgba(148, 163, 184, 0.14); color: #94a3b8; }
+
+/* ─── Test scope toggle ──────────────────────────────────────────────────── */
+.scope-toggle { display: flex; gap: 10px; align-items: flex-start; margin-top: 10px; padding: 10px 12px; border: 1px solid var(--border-default); border-radius: var(--radius-md); background: var(--bg-surface-elevated); cursor: pointer; font-size: 13px; }
+.scope-toggle input { margin-top: 3px; width: 16px; height: 16px; flex: 0 0 auto; }
+.scope-toggle-hint { display: block; color: var(--text-secondary); font-size: 12px; margin-top: 2px; }
+
+/* ─── Page readiness ─────────────────────────────────────────────────────── */
+.readiness-card { margin: 12px 0; padding: 12px 14px; border: 1px solid var(--border-default); border-radius: var(--radius-md); background: var(--bg-surface-elevated); }
+.readiness-card.rd-data-not-loaded { border-color: rgba(245, 158, 11, 0.5); background: rgba(245, 158, 11, 0.06); }
+.readiness-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.readiness-state { padding: 2px 8px; border-radius: var(--radius-sm); font-size: 11px; font-weight: 700; letter-spacing: 0.03em; }
+.rd-pill-ready { background: rgba(34, 197, 94, 0.16); color: #4ade80; }
+.rd-pill-partial { background: rgba(34, 197, 94, 0.16); color: #4ade80; }
+.rd-pill-empty { background: rgba(148, 163, 184, 0.18); color: #cbd5e1; }
+.rd-pill-data-not-loaded { background: rgba(245, 158, 11, 0.2); color: #fbbf24; }
+.readiness-summary { margin: 8px 0; font-size: 13px; line-height: 1.5; color: var(--text-primary); }
+.readiness-meta { font-size: 12px; color: var(--text-secondary); margin: 4px 0; }
+.readiness-table { margin-top: 8px; overflow-x: auto; }
+.readiness-table table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.readiness-table th, .readiness-table td { text-align: left; vertical-align: top; padding: 5px 8px; border-top: 1px solid var(--border-subtle); word-break: break-word; }
+.readiness-table th { color: var(--text-secondary); font-weight: 600; }
+.rq-blocked { color: #fbbf24; font-weight: 700; } .rq-failed { color: #f87171; font-weight: 700; } .rq-ok { color: #4ade80; font-weight: 700; }
+
+/* observations that did not pass the finding gate */
+.observations-box { margin: 12px 0 16px; padding: 12px 16px; border: 1px solid var(--border-color, #d0d7de); border-radius: 8px; font-size: 13px; line-height: 1.5; }
+.observations-box summary { cursor: pointer; }
+.observations-box ul { margin: 10px 0 0; padding-left: 18px; }
+.observations-box li { margin: 4px 0; word-break: break-word; }

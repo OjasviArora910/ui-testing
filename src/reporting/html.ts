@@ -13,7 +13,7 @@ const STATE_LABEL: Record<string, string> = { defect: 'Defect', pending: 'Needs 
 const MAX_EMBED_BYTES = 350_000;
 const MAX_TOTAL_EMBED = 6_000_000;
 
-function path(u: string): string { try { const x = new URL(u); return x.pathname + x.search; } catch { return u; } }
+function path(u: string): string { try { const x = new URL(u); return x.pathname + x.search + x.hash; } catch { return u; } }
 
 function card(f: ReportFinding, embed: (f: ReportFinding) => string, others: ReportFinding[] = []): string {
   const ai = f.ai;
@@ -61,8 +61,8 @@ export function renderHtml(data: ReportData, store?: EvidenceStore): string {
   const uiux = data.findings.filter((f) => f.track !== 'accessibility');
   const a11y = data.findings.filter((f) => f.track === 'accessibility' && f.reviewState !== 'dismissed');
   const groups: [string, ReportFinding[]][] = [
-    ['UI/UX bugs and warnings (confirmed by a rule or a human)', uiux.filter((f) => f.reviewState === 'defect' || f.reviewState === 'confirmed')],
-    ['UI/UX: needs human review', uiux.filter((f) => f.reviewState === 'pending' || f.reviewState === 'investigating')],
+    ['CONFIRMED UI/UX BUGS', uiux.filter((f) => f.resultClass === 'BUG')],
+    ['INCONCLUSIVE: observations that are NOT bugs (not confirmed; kept as a record)', uiux.filter((f) => f.resultClass === 'INCONCLUSIVE')],
     ...(data.accessibility.enabled || a11y.length ? [[`Accessibility findings (separate from UI/UX bugs; ${data.accessibility.failRun ? 'required for this run' : 'they do not affect the verdict'}). A control listed here may work correctly and still be unusable with assistive technology`, a11y] as [string, ReportFinding[]]] : []),
     ['Dismissed by a human', data.findings.filter((f) => f.reviewState === 'dismissed')],
   ];
@@ -96,10 +96,13 @@ table{border-collapse:collapse;width:100%;background:#fff}td,th{border:1px solid
 <h1>QA report</h1><p class="meta">${esc(data.run.url)} · run ${esc(data.run.id)} · mode ${esc(data.run.mode)} · ${esc(data.run.finishedAt ?? data.generatedAt)}</p>
 <p><span class="verdict" style="background:${VERDICT_COLOR[data.run.verdict]}">${esc(data.run.verdict)}</span></p>
 ${data.incomplete ? `<p class="note"><strong>Incomplete run</strong> (${esc(data.run.abortReason ?? data.run.error ?? data.run.status)}). Results cover only what was tested before the run stopped.</p>` : ''}
-<div class="tiles"><div class="tile"><b>${s.pages}</b>pages tested</div><div class="tile"><b>${data.testResults.length}</b>interactions tested</div><div class="tile"><b>${data.testResults.filter((r) => r.classification === 'EXPECTED').length}</b>worked as expected</div><div class="tile"><b>${s.counts?.bugs ?? 0}</b>bugs</div><div class="tile"><b>${s.counts?.warnings ?? 0}</b>warnings</div>${data.accessibility.enabled ? `<div class="tile"><b>${a11y.length}</b>accessibility</div>` : ''}<div class="tile"><b>${s.anomalies}</b>to review</div><div class="tile"><b>${s.actions}</b>actions</div><div class="tile"><b>${s.guardBlocked}</b>blocked by safety guard</div></div>
+<div class="tiles"><div class="tile"><b>${s.pages}</b>pages tested</div><div class="tile"><b>${data.testResults.length}</b>interactions tested</div><div class="tile"><b>${data.testResults.filter((r) => r.classification === 'EXPECTED').length}</b>PASS</div><div class="tile"><b>${data.testResults.filter((r) => r.classification === 'INCONCLUSIVE' || r.classification === 'BLOCKED_BY_SAFETY' || r.classification === 'NEEDS_REVIEW').length}</b>INCONCLUSIVE / BLOCKED</div><div class="tile"><b>${s.counts?.bugs ?? 0}</b>CONFIRMED BUGS</div>${data.accessibility.enabled ? `<div class="tile"><b>${a11y.length}</b>accessibility</div>` : ''}<div class="tile"><b>${s.counts?.needsReview ?? 0}</b>observations (not bugs)</div><div class="tile"><b>${s.actions}</b>actions</div><div class="tile"><b>${s.guardBlocked}</b>blocked by safety guard</div></div>
 <p>${cats || '<span class="meta">No active findings.</span>'}</p>
 <p class="meta">Viewports: ${esc(data.limits.viewports.join(', '))} · limits: ${data.limits.maxPages} pages, ${data.limits.maxActions} actions, depth ${data.limits.maxDepth} · visual: ${s.visual.pass} pass, ${s.visual.fail} fail, ${s.visual.noBaseline} no baseline</p>
 ${groups.map(([title, list]) => { const problems = groupProblems(list); return `<h2>${esc(title)} (${problems.length}${problems.length !== list.length ? ` problems, ${list.length} occurrences` : ''})</h2>${problems.map((g) => card(g.representative, embed, g.occurrences.slice(1))).join('') || '<p class="meta">None.</p>'}`; }).join('')}
+${data.pages.some((p) => p.readiness) ? `<h2>Page readiness</h2><p class="meta">What each page requested while loading and what became of it. A page whose required data did not load is not showing its real content; blocked auxiliary requests (shell or secondary data, other hosts) do not affect it.</p>${data.pages.filter((p) => p.readiness).map((p) => { const r = p.readiness!; return `<article class="card"><header><span class="sev" style="background:${r.state === 'ready' || r.state === 'partial' ? '#1a7f37' : r.state === 'empty' ? '#57606a' : '#bc4c00'}">${esc(r.state === 'partial' ? 'READY (AUXILIARY DATA BLOCKED)' : r.state.toUpperCase().replace(/-/g, ' '))}</span> <strong>${esc(path(p.url))}</strong></header><p>${esc(r.summary)}</p>
+<p class="meta">Cookies present (names only): ${esc(r.cookieNames.join(', ') || 'none')} · static files: ${r.staticFiles.loaded}/${r.staticFiles.total} loaded${r.staticFiles.blocked ? `, ${r.staticFiles.blocked} blocked` : ''}${r.staticFiles.failed ? `, ${r.staticFiles.failed} failed` : ''}</p>
+<details${r.state === 'data-not-loaded' ? ' open' : ''}><summary>${r.requests.length} document/API request(s)</summary><div class="wrap"><table><tr><th>Result</th><th>Method</th><th>Endpoint</th><th>Status</th><th>Why</th><th>Credentials attached (names)</th><th>Response</th></tr>${r.requests.map((q) => `<tr><td>${esc(q.outcome.toUpperCase())}</td><td>${esc(q.method)}</td><td>${esc(q.endpoint)}</td><td>${esc(q.status ?? '')}</td><td>${esc(q.reason ?? '')}</td><td>${esc([...(q.auth?.cookieNames ?? []).map((n) => `cookie:${n}`), ...(q.auth?.headerNames ?? []).map((n) => `header:${n}`)].join(', ') || 'none')}</td><td>${esc(q.response ? `${q.response.body}${q.response.items !== undefined ? ` (${q.response.items} items)` : ''}` : '')}</td></tr>`).join('')}</table></div></details></article>`; }).join('')}` : ''}
 ${dynamic ? `<h2>Dynamic test selection</h2><p class="meta">What was detected on each page, which tests were selected for it and which were skipped.</p>${dynamic}` : ''}
 <h2>Pages</h2><div class="wrap"><table><tr><th>URL</th><th>HTTP</th><th>Title</th><th>Tested</th></tr>${data.pages.map((p) => `<tr><td>${esc(p.url)}</td><td>${esc(p.statusCode ?? p.error ?? '')}</td><td>${esc(p.title ?? '')}</td><td>${esc(p.testStatus)}</td></tr>`).join('')}</table></div>
 <h2>Rules evaluated</h2><p class="meta">${data.rulesRun.map(esc).join(', ') || 'n/a'}</p>

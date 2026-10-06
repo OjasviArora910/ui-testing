@@ -285,6 +285,10 @@ export interface FunctionalContext {
   budget: ActionBudget;
   /** Link targets already tested during this run (site-wide nav links are only followed once). */
   testedLinks?: Set<string>;
+  /** "This page only": the application's global navigation is not part of the page under test and is skipped. */
+  pageOnly?: boolean;
+  /** One controlled creation, explicitly authorized for this exact page (config `workflows`). Runs after the generic tests. */
+  workflow?: import('./workflow.js').WorkflowPolicy;
   /** Dynamic selection: when present, only the testers and elements it names are exercised. Absent => every generic suite runs. */
   plan?: TestPlan;
   /** Called once for every finished element test, as soon as it finishes, so progress can be saved continuously. */

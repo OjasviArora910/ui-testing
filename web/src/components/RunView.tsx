@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api, type DynamicData, type Finding, type ProgressEvent, type Run, type Severity, type Snapshot } from '../api';
+import { api, type DynamicData, type PageReadiness, type Finding, type ProgressEvent, type Run, type Severity, type Snapshot } from '../api';
 import { DynamicPanel } from './DynamicPanel';
+import { ReadinessPanel } from './ReadinessPanel';
 import { EvidenceModal, type EvidenceItem } from './EvidenceModal';
 import { FindingCard } from './FindingCard';
 import {
@@ -76,6 +77,7 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
     }
   };
   const [dynamic, setDynamic] = useState<DynamicData | null>(null);
+  const [readiness, setReadiness] = useState<{ url: string; title: string | null; readiness: PageReadiness }[]>([]);
 
   const toggleRuleExpand = (ruleId: string) => {
     setExpandedRules((prev) => ({ ...prev, [ruleId]: !prev[ruleId] }));
@@ -86,7 +88,8 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
       const r = await api.run(runId);
       setRun(r);
       if (r.progress) setSnap(r.progress);
-      const [q, f, d] = await Promise.all([api.queue(runId), api.findings(runId), api.dynamic(runId).catch(() => null)]);
+      const [q, f, d, rd] = await Promise.all([api.queue(runId), api.findings(runId), api.dynamic(runId).catch(() => null), api.readiness(runId).catch(() => [])]);
+      setReadiness(rd);
       setQueue(q);
       setFindings(f);
       setDynamic(d);
@@ -108,6 +111,7 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
       setEvents((prev) => (prev.some((p) => p.seq === ev.seq) ? prev : [...prev.slice(-400), ev]));
       // a page was classified and its tests selected: show the decision while the run is still going
       if (ev.type === 'page' && ev.data?.decision) void api.dynamic(runId).then(setDynamic).catch(() => undefined);
+      if (ev.type === 'page' && ev.data?.readiness) void api.readiness(runId).then(setReadiness).catch(() => undefined);
       if (ev.type === 'done' || ev.type === 'error' || (ev.type === 'status' && ev.message === 'REPORTING')) {
         void reload();
         onChange();
@@ -127,7 +131,18 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
   // Two separate tracks: UI/UX findings (is the interface broken?) and accessibility findings (can everyone use it?).
   // A control can work correctly and still have an accessibility finding; that never counts as a UI/UX bug.
   const isA11y = (f: Finding) => (f.track ? f.track === 'accessibility' : f.category === 'accessibility' || f.ruleId.startsWith('a11y.'));
-  const uiFindings = useMemo(() => findings.filter((f) => !isA11y(f)), [findings]);
+  // The finding gate ran on the server: only CONFIRMED bugs are findings. Everything else is an observation, not a bug.
+  const uiFindings = useMemo(() => findings.filter((f) => !isA11y(f) && f.resultClass === 'BUG'), [findings]);
+  const observations = useMemo(() => {
+    const byProblem = new Map<string, { f: Finding; n: number }>();
+    for (const f of findings) {
+      if (isA11y(f) || f.resultClass === 'BUG' || f.resultClass === 'EXPECTED') continue;
+      const k = `${f.ruleId}|${f.actual.replace(/\d+/g, '#').slice(0, 60)}`;
+      const e = byProblem.get(k);
+      if (e) e.n++; else byProblem.set(k, { f, n: 1 });
+    }
+    return [...byProblem.values()];
+  }, [findings]);
   const a11yFindings = useMemo(() => findings.filter(isA11y), [findings]);
   const uiCounts = useMemo(() => ({
     // distinct problems, not occurrences
@@ -221,14 +236,14 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
     return counts;
   }, [uiFindings]);
 
-  // Category counts
+  // Category counts: CONFIRMED bugs only (plus the separate accessibility track). Observations are never counted here.
   const categoryCounts = useMemo(() => {
     const map: Record<string, number> = {};
-    for (const f of findings) {
+    for (const f of [...uiFindings, ...a11yFindings]) {
       map[f.category] = (map[f.category] || 0) + 1;
     }
     return map;
-  }, [findings]);
+  }, [uiFindings, a11yFindings]);
 
   const allCategories = ['layout', 'functional', 'accessibility', 'network', 'usability', 'responsive', 'performance'];
 
@@ -276,6 +291,7 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
             <div className="results-meta-strip">
               <span className="results-id-pill">{run.id}</span>
               <span className="results-meta-item">Mode: <strong>{run.mode.replace('_', ' ')}</strong></span>
+              <span className="results-meta-item">Scope: <strong>{run.scope === 'page' ? 'this page only' : 'whole site'}</strong></span>
               <span className="results-meta-item">
                 Started: {new Date(run.createdAt).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
               </span>
@@ -426,6 +442,8 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
           <strong>{run.state === 'ERROR' ? 'FAILED' : 'ABORTED'}</strong> {run.note}
         </div>
       )}
+      <ReadinessPanel pages={readiness} />
+
       <section className="metrics-grid">
         <div className="metric-card">
           <span className="metric-label">Status</span>
@@ -446,21 +464,21 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
         </div>
 
         <div className="metric-card">
-          <span className="metric-label">Passed</span>
+          <span className="metric-label">Pass</span>
           <span className="metric-value metric-value-success">{counts?.passed ?? 0}</span>
-          <span className="metric-sub">worked; not listed as findings{(counts?.inconclusive ?? 0) > 0 ? ` · ${counts?.inconclusive} had no visible effect` : ''}</span>
+          <span className="metric-sub">expected behaviour was observed</span>
         </div>
 
         <div className="metric-card">
-          <span className="metric-label">Bugs</span>
-          <span className="metric-value metric-value-danger">{counts?.bugs ?? 0}</span>
-          <span className="metric-sub">{counts?.warnings ?? 0} warnings</span>
+          <span className="metric-label">Inconclusive / Blocked</span>
+          <span className="metric-value">{(counts?.inconclusive ?? 0) + (counts?.blocked ?? 0)}</span>
+          <span className="metric-sub">{counts?.inconclusive ?? 0} could not be verified · {counts?.blocked ?? 0} skipped for safety · never counted as bugs</span>
         </div>
 
         <div className="metric-card">
-          <span className="metric-label">Needs Review</span>
-          <span className="metric-value">{counts?.needsReview ?? 0}</span>
-          <span className="metric-sub">could not be decided</span>
+          <span className="metric-label">Confirmed Bugs</span>
+          <span className="metric-value metric-value-danger">{uiCounts.bugs}</span>
+          <span className="metric-sub">expected vs actual contradicted, with evidence</span>
         </div>
 
         {(active || run.state === 'ABORTED' || (counts?.notTestedPages ?? 0) + (counts?.notTestedElements ?? 0) > 0) && (
@@ -521,13 +539,13 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
       {/* Interactive Category Filter Cards */}
       <section className="categories-section">
         <div className="categories-header">
-          <h3 className="categories-title">Findings by Category</h3>
+          <h3 className="categories-title">Confirmed Bugs by Category</h3>
           <span className="categories-subtitle">Click a category card to quickly filter the findings below</span>
         </div>
 
         <div className="category-cards-grid">
           {allCategories.map((catKey) => {
-            const count = categoryCounts[catKey] || s?.categories?.[catKey] || 0;
+            const count = categoryCounts[catKey] || 0;
             const meta = CATEGORY_META[catKey] || { label: catKey, icon: '🔍', desc: 'Category findings' };
             const isSelected = categoryFilter === catKey;
 
@@ -562,7 +580,7 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
           onClick={() => setTab('findings')}
         >
           <IconLayers style={{ width: 15, height: 15 }} />
-          <span>UI/UX Findings</span>
+          <span>Confirmed Bugs</span>
           <span className="tab-counter-badge">{uiFindings.length}</span>
         </button>
 
@@ -742,6 +760,21 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
             </div>
           </div>
 
+          {observations.length > 0 && (
+            <details className="observations-box">
+              <summary>
+                {observations.length} observation(s) were recorded and are <strong>not bugs</strong>: they did not pass the finding gate (no contradiction of an expected behaviour, no proof a user sees a problem, or the page had not loaded all its data).
+              </summary>
+              <ul>
+                {observations.slice(0, 40).map(({ f, n }) => (
+                  <li key={f.id}>
+                    <span className="result-class rc-INCONCLUSIVE">inconclusive</span> <code>{f.ruleId}</code>{n > 1 ? ` ×${n}` : ''}: {f.actual.slice(0, 220)}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+
           {/* Findings List */}
           {uiFindings.length === 0 && (run?.status === 'ERROR' || (run?.status === 'ABORTED' && (run.summary?.pages ?? 0) === 0)) ? (
             <div className="empty-state-box">
@@ -758,7 +791,7 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
               <div className="empty-state-icon">
                 <IconCheck style={{ width: 36, height: 36 }} className="text-success" />
               </div>
-              <h3 className="empty-state-title">No matching findings found</h3>
+              <h3 className="empty-state-title">{uiFindings.length === 0 ? 'No confirmed bugs' : 'No matching findings found'}</h3>
               <p className="empty-state-desc">
                 {uiFindings.length === 0
                   ? (run?.summary?.pages ?? 0) > 0

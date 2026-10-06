@@ -1,7 +1,10 @@
 import { testButtons } from './buttons.js';
 import { testFields } from './fields.js';
 import { testForms } from './forms.js';
+import { resetPage } from './helpers.js';
 import { testLinks } from './links.js';
+import { testReversibleControls } from './reversible.js';
+import { runCreationWorkflow } from './workflow.js';
 import { testModals } from './modal.js';
 import { testSearch } from './search.js';
 import type { FunctionalContext, FunctionalResult } from './types.js';
@@ -15,6 +18,14 @@ const REVIEWABLE = new Set(['soft-error-page', 'clickable', 'destination']);
 
 type Suite = [FunctionalResult['kind'], (c: FunctionalContext) => Promise<FunctionalResult[]>];
 
+async function testSliders(ctx: FunctionalContext): Promise<FunctionalResult[]> {
+  const results: FunctionalResult[] = [];
+  const present = await ctx.controller.page.evaluate("!!document.querySelector('input[type=range], [role=slider], .ui-slider-handle, .noUi-handle, .rc-slider-handle, .MuiSlider-thumb, .slider-handle')").catch(() => false);
+  if (!present || !(await resetPage(ctx))) return results;
+  await testReversibleControls(ctx, (r) => { results.push(r); ctx.onResult?.(r); }, { onlyNew: false, kinds: ['slider'] });
+  return results;
+}
+
 /** Without a plan every generic suite runs (legacy). With a plan only the testers it selected run, on the elements it named. */
 function suitesFor(ctx: FunctionalContext): Suite[] {
   const plan = ctx.plan;
@@ -26,6 +37,10 @@ function suitesFor(ctx: FunctionalContext): Suite[] {
   if (plan.searches.length > 0) suites.push(['search', testSearch]);
   if (plan.modals.length > 0) suites.push(['modal', testModals]);
   if (plan.fields.length > 0) suites.push(['interactive', testFields]);
+  // sliders on the page itself: moved one step, verified, and put back exactly (other form controls are covered above)
+  if (plan.buttons.length + plan.fields.length + plan.modals.length > 0 || plan.links) suites.push(['interactive', testSliders]);
+  // last, and only when explicitly authorized for this exact page: one controlled creation
+  if (ctx.workflow) suites.push(['form', (c) => runCreationWorkflow(c, ctx.workflow!)]);
   return suites;
 }
 

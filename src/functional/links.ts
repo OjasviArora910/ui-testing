@@ -1,3 +1,4 @@
+import { shellAmong } from '../discovery/shell.js';
 import { normalizeUrl, sameOrigin } from '../discovery/crawler.js';
 import { resetPage } from './helpers.js';
 import { notInteractable, prepareInteraction } from './interact.js';
@@ -15,7 +16,10 @@ export async function testLinks(ctx: FunctionalContext): Promise<FunctionalResul
   const seen = new Set<string>();
   const origin = ctx.pageUrl;
   const tested = ctx.testedLinks ?? new Set<string>();
-  const links = structure.links.filter((l) => l.visible)
+  // "This page only": links of the application's global navigation lead to other pages and are not part of this one
+  const shell = ctx.pageOnly ? await shellAmong(c, structure.links.filter((l) => l.visible).map((l) => l.selector)) : new Set<string>();
+  if (shell.size > 0) ctx.onAction?.({ type: 'skip', target: `${shell.size} global navigation link(s)`, ok: true, detail: 'not part of the page under test (page-only scope)' });
+  const links = structure.links.filter((l) => l.visible && !shell.has(l.selector))
     .sort((a, b) => Number(a.inNav) - Number(b.inNav)) // page-specific links first, shared navigation last
     .filter((l) => {
       const key = normalizeUrl(l.resolved, ctx.pageUrl) ?? l.href;

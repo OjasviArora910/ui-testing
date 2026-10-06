@@ -23,6 +23,8 @@ export interface ElementInfo {
   styles: Record<StyleKey, string>;
   scroll: { scrollWidth: number; clientWidth: number; scrollHeight: number; clientHeight: number };
   href?: string | null;
+  /** Set on a non-semantic element recognised as a safe entry control (opens, shows or edits content), with the evidence for it. */
+  entry?: { kind: 'labelled' | 'row'; evidence: string[] };
   required?: boolean;
 }
 
@@ -40,6 +42,8 @@ export interface ElementTarget {
   nth?: number;
 }
 
+export type RequestPhase = 'page-load' | 'action';
+
 export interface NetworkEvent {
   id: number;
   url: string; // redacted
@@ -54,6 +58,15 @@ export interface NetworkEvent {
   ignored: boolean;
   /** Aborted by the platform's own request guard / external-origin blocking; never an app defect. */
   blockedByGuard?: boolean;
+  /** Which of the platform's rules stopped the request, and why (set only when the platform blocked it). */
+  blockedBy?: 'safety-guard' | 'external-host';
+  blockReason?: string;
+  /** Whether the request belongs to loading the page, or was caused by an action the tester performed. */
+  phase?: RequestPhase;
+  /** NAMES of the credentials the browser attached (cookies) or the page set (headers). Never values. */
+  auth?: { cookieNames: string[]; headerNames: string[] };
+  /** Shape of an API response, without its content: was there any data in it? */
+  response?: { contentType?: string; bytes?: number; body: 'data' | 'empty' | 'unknown'; items?: number };
 }
 
 export interface ConsoleEvent {
@@ -105,3 +118,6 @@ export type StyleKey =
   | 'display' | 'position' | 'visibility' | 'opacity' | 'overflow' | 'overflowX' | 'overflowY' | 'zIndex' | 'color'
   | 'backgroundColor' | 'fontSize' | 'fontWeight' | 'textOverflow' | 'whiteSpace' | 'pointerEvents' | 'cursor'
   | 'webkitLineClamp' | 'clip' | 'clipPath' | 'width' | 'height' | 'flexWrap' | 'objectFit';
+
+/** One clickable-looking element inside a table row, the evidence found for it and what was decided (diagnostic record). */
+export interface RowCandidate { row: string; tag: string; className: string; text: string; visible: boolean; evidence: string[]; decision: string }

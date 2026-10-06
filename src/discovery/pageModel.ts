@@ -61,11 +61,13 @@ export async function buildPageModel(controller: BrowserController, opts: { stat
   const interactive = await controller.interactiveElements();
   for (const e of interactive) {
     const type = classifyInteractive(e);
-    const me = fromInfo(type, e, { tag: e.tag, inputType: e.type ?? null });
+    const me = fromInfo(type, e, { tag: e.tag, inputType: e.type ?? null, className: e.className || null, ...(e.entry ? { entry: e.entry.kind, entryEvidence: e.entry.evidence.join('; ') } : {}) });
     model.interactive.push(me);
     const bucket = ({ button: model.buttons, link: model.links, input: model.inputs, select: model.selects, checkbox: model.checkboxes, radio: model.radios, textarea: model.textareas } as Record<string, ModelElement[] | undefined>)[type];
     bucket?.push(me);
   }
+
+  if (model.tables.some((t) => t.visible)) model.rowCandidates = await controller.rowCandidates();
 
   for (const k of ['headings', 'buttons', 'links', 'inputs', 'selects', 'checkboxes', 'radios', 'textareas', 'forms', 'dialogs', 'menus', 'tabs', 'accordions', 'tables', 'images', 'interactive'] as const) {
     model.counts[k] = model[k].length;

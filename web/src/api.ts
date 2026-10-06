@@ -28,6 +28,8 @@ export interface Run {
   error: string | null; abortReason: string | null; active: boolean; interrupted: boolean; progress: Snapshot | null;
   summary: { counts?: { bugs: number; warnings: number; needsReview: number; accessibility: number; accessibilityNeedsReview: number }; pages: number; defects: number; anomalies: number; pendingReview: number; actions: number; guardBlocked: number; visual: { pass: number; fail: number; noBaseline: number } } | null;
   reports: { html: boolean; json: boolean; junit: boolean };
+  /** `page`: only the entered URL was tested; `site`: pages were crawled from it. */
+  scope?: 'site' | 'page';
   /** RUNNING until the run ends, then COMPLETED / ABORTED / ERROR (INTERRUPTED = the server restarted mid-run). */
   state?: 'RUNNING' | 'COMPLETED' | 'ABORTED' | 'ERROR' | 'INTERRUPTED';
   counts?: RunCounts;
@@ -53,6 +55,19 @@ export interface DynamicData {
   pages: { url: string; title: string | null; decision: PageDecision }[];
   results: TestResult[];
   accessibility: { enabled: boolean; failRun: boolean };
+}
+
+export interface ReadinessRequest {
+  method: string; url: string; endpoint: string; type: string; status: number | null; outcome: 'ok' | 'failed' | 'blocked';
+  blockedBy?: 'safety-guard' | 'external-host'; reason?: string; startedMs: number;
+  auth?: { cookieNames: string[]; headerNames: string[] };
+  response?: { contentType?: string; bytes?: number; body: 'data' | 'empty' | 'unknown'; items?: number };
+}
+/** What a page requested while loading and what became of it. Names of credentials only, never values. */
+export interface PageReadiness {
+  url: string; state: 'ready' | 'partial' | 'data-not-loaded' | 'empty'; summary: string; requests: ReadinessRequest[];
+  staticFiles: { total: number; loaded: number; failed: number; blocked: number; hosts: string[] };
+  cookieNames: string[]; storageKeys: { local: string[]; session: string[] }; emptyStateText: string[]; consoleErrors: string[];
 }
 
 export interface Finding {
@@ -98,13 +113,14 @@ export const api = {
   config: () => req<PlatformConfig>('/api/config'),
   runs: () => req<{ runs: Run[] }>('/api/runs').then((r) => r.runs),
   run: (id: string) => req<Run>(`/api/runs/${id}`),
-  start: (body: { url: string; auth?: DirectAuth; authProfile?: string; mode: Mode; viewports: Viewport[]; overrides?: Record<string, unknown> }) => req<{ runId: string }>('/api/runs', { method: 'POST', body: JSON.stringify(body) }),
+  start: (body: { url: string; scope?: 'site' | 'page'; auth?: DirectAuth; authProfile?: string; mode: Mode; viewports: Viewport[]; overrides?: Record<string, unknown> }) => req<{ runId: string }>('/api/runs', { method: 'POST', body: JSON.stringify(body) }),
   stop: (id: string) => req<{ stopped: boolean }>(`/api/runs/${id}/stop`, { method: 'POST', body: '{}' }),
   resume: (id: string, auth?: DirectAuth) => req<{ runId: string }>(`/api/runs/${id}/resume`, { method: 'POST', body: JSON.stringify(auth ? { auth } : {}) }),
   findings: (id: string) => req<{ findings: Finding[] }>(`/api/runs/${id}/findings`).then((r) => r.findings),
   queue: (id: string) => req<{ queue: Finding[] }>(`/api/runs/${id}/review-queue`).then((r) => r.queue),
   decide: (findingId: string, decision: Decision, note?: string) => req<{ verdict: string }>(`/api/findings/${findingId}/decision`, { method: 'POST', body: JSON.stringify({ decision, note: note || undefined }) }),
   approveBaseline: (runId: string, page: string, viewport: string) => req<{ file: string }>(`/api/runs/${runId}/baselines`, { method: 'POST', body: JSON.stringify({ page, viewport }) }),
+  readiness: (id: string) => req<{ pages: { url: string; title: string | null; readiness: PageReadiness }[] }>(`/api/runs/${id}/readiness`).then((r) => r.pages),
   dynamic: (id: string) => req<DynamicData>(`/api/runs/${id}/dynamic`),
   simulation: (runId: string) => req<{ simulation: SimulationStep[] }>(`/api/runs/${runId}/simulation`).then((r) => r.simulation),
 };

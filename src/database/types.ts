@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { FindingClass, FindingCounts, FindingTrack } from '../dynamic/resultClassifier.js';
+import type { PageReadiness } from '../browser/readiness.js';
 import type { PageDecision, ResultClass } from '../dynamic/types.js';
 import type { ConfidenceLevel } from '../functional/types.js';
 import type { Finding } from '../shared/types.js';
@@ -94,6 +95,8 @@ export interface PageRecord {
   testStatus: 'pending' | 'tested' | 'skipped'; model: unknown | null; discoveredAt: string;
   /** What was detected on the page and which tests were selected/skipped (dynamic selection). */
   decision: PageDecision | null;
+  /** What happened while the page loaded: requests made, blocked, failed; whether its data arrived. */
+  readiness: PageReadiness | null;
 }
 
 export interface ActionRecord { id: number; runId: string; pageUrl: string | null; viewport: string | null; source: string; type: string; target: string | null; ok: boolean; detail: string | null; at: string }

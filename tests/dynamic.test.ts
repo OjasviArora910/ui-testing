@@ -47,24 +47,24 @@ describe('context-aware synthetic values', () => {
 
 describe('result classification', () => {
   const r = (o: Partial<FunctionalResult>): FunctionalResult => ({ kind: 'button', check: 'x', status: 'pass', severity: 'info', basis: null, element: null, expected: 'e', actual: 'a', ...o });
-  it('maps outcomes to BUG / WARNING / EXPECTED / NEEDS_REVIEW / BLOCKED_BY_SAFETY', () => {
+  it('maps outcomes to BUG / EXPECTED / INCONCLUSIVE / BLOCKED_BY_SAFETY', () => {
     expect(classifyResult(r({ status: 'fail', severity: 'major', basis: 'deterministic', confidence: 'HIGH' }))).toBe('BUG');
-    expect(classifyResult(r({ status: 'fail', severity: 'minor', basis: 'generic_rule' }))).toBe('WARNING');
+    expect(classifyResult(r({ status: 'fail', severity: 'minor', basis: 'generic_rule' }))).toBe('BUG');
     expect(classifyResult(r({ status: 'pass' }))).toBe('EXPECTED');
-    expect(classifyResult(r({ status: 'anomaly' }))).toBe('NEEDS_REVIEW');
+    expect(classifyResult(r({ status: 'anomaly' }))).toBe('INCONCLUSIVE');
     expect(classifyResult(r({ status: 'blocked' }))).toBe('BLOCKED_BY_SAFETY');
     expect(classifyResult(r({ status: 'skipped', check: 'guard' }))).toBe('BLOCKED_BY_SAFETY');
     expect(classifyResult(r({ status: 'skipped', check: 'visibility' }))).toBeNull();
   });
   it('a low-confidence or basis-less failure is never a BUG', () => {
-    expect(classifyResult(r({ status: 'fail', severity: 'major', basis: 'deterministic', confidence: 'LOW' }))).toBe('NEEDS_REVIEW');
-    expect(classifyResult(r({ status: 'fail', severity: 'major', basis: null }))).toBe('NEEDS_REVIEW');
+    expect(classifyResult(r({ status: 'fail', severity: 'major', basis: 'deterministic', confidence: 'LOW' }))).toBe('INCONCLUSIVE');
+    expect(classifyResult(r({ status: 'fail', severity: 'major', basis: null }))).toBe('INCONCLUSIVE');
   });
   it('labels stored findings the same way and honours human decisions', () => {
     const ui = { category: 'layout', ruleId: 'geometry.overlap' };
     expect(classifyFinding({ classification: 'defect', severity: 'major', ...ui })).toBe('BUG');
-    expect(classifyFinding({ classification: 'defect', severity: 'minor', ...ui })).toBe('WARNING');
-    expect(classifyFinding({ classification: 'anomaly', severity: 'major', ...ui })).toBe('NEEDS_REVIEW');
+    expect(classifyFinding({ classification: 'defect', severity: 'minor', ...ui })).toBe('BUG');
+    expect(classifyFinding({ classification: 'anomaly', severity: 'major', ...ui })).toBe('INCONCLUSIVE');
     expect(classifyFinding({ classification: 'anomaly', severity: 'minor', reviewState: 'confirmed', ...ui })).toBe('BUG');
     expect(classifyFinding({ classification: 'defect', severity: 'major', reviewState: 'dismissed', ...ui })).toBe('EXPECTED');
   });

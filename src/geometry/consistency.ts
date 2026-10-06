@@ -7,18 +7,17 @@ import { ElementIndex, area, bottom, isVisuallyHiddenPattern, overlapRatio, righ
 const MAX_PER_RULE = 10;
 /** Smaller than this in either dimension an image is an icon, spacer or placeholder, not a picture whose shape matters. */
 const MIN_PICTURE = 48;
-const sameOrigin = (src: string, page: string): boolean => { try { return new URL(src, page).origin === new URL(page).origin; } catch { return false; } };
 const isSvg = (src: string): boolean => /\.svg(\?|#|$)|^data:image\/svg/i.test(src);
 
 // ---------------------------------------------------------------- images
 export const brokenImageRule: Rule = {
   id: 'image.broken', name: 'Broken image', category: 'layout', severity: 'major', basis: 'deterministic',
-  description: 'A visible same-origin image finished loading with no pixel data (missing or invalid file). Cross-origin images are not judged because the test browser blocks external hosts.',
+  description: 'A visible image finished loading with no pixel data (missing or invalid file).',
   async evaluate(ctx) {
     const out: Finding[] = [];
     for (const img of ctx.model.images) {
       const src = String(img.meta?.src ?? '');
-      if (!img.visible || !src || isSvg(src) || !sameOrigin(src, ctx.page)) continue;
+      if (!img.visible || !src || isSvg(src)) continue;
       if (img.meta?.complete !== true || Number(img.meta?.naturalWidth ?? 0) > 0) continue;
       out.push(makeFinding(brokenImageRule, ctx, {
         classification: 'defect', element: { selector: img.selector, role: 'img', name: img.name || src.slice(-60), box: img.box },

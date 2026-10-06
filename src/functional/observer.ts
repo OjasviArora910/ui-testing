@@ -141,6 +141,8 @@ export async function capturePreActionSnapshot(
   targetSelector?: string,
   options: { captureScreenshot?: boolean } = {},
 ): Promise<PreActionSnapshot> {
+  // From this point on, new requests are the result of the action about to be performed, not of the page loading.
+  c.beginAction();
   const url = c.url;
   const rawUrl = c.page.url();
   const netCount = c.events.network.length;
@@ -263,7 +265,8 @@ export async function observeAction(
   const postBuf = options.captureScreenshot !== false
     ? await c.page.screenshot({ type: 'jpeg', quality: 65 }).catch(() => undefined)
     : undefined;
-  const netSlice = c.events.network.slice(pre.networkCount);
+  // Requests that belong to the page loading (including late ones still arriving) are not consequences of this action.
+  const netSlice = c.events.network.slice(pre.networkCount).filter((n) => n.phase !== 'page-load' && n.startedAt >= pre.timestamp);
   const conSlice = c.events.console.slice(pre.consoleCount);
 
   // 4. Calculate transitions and diffs
@@ -320,7 +323,7 @@ export async function observeAction(
   }
 
   // Requests stopped by ActionGuard (and cancelled/ignored ones) are not application failures.
-  const blockedByGuard = c.blockedRequests.slice(pre.blockedCount ?? c.blockedRequests.length).map((b) => `${b.method} ${b.url}`);
+  const blockedByGuard = c.blockedRequests.slice(pre.blockedCount ?? c.blockedRequests.length).filter((b) => b.phase === 'action' && b.at >= pre.timestamp).map((b) => `${b.method} ${b.url}`);
   const networkRequests = netSlice.filter((n) => !n.ignored && !n.blockedByGuard).map((n) => ({
     method: n.method,
     url: n.url,

@@ -3,6 +3,7 @@ import type { QADatabase } from '../database/db.js';
 import { computeVerdict } from '../database/review.js';
 import type { FindingView, RunCounts, RunSummary, TestResultRecord, Verdict } from '../database/types.js';
 import { countFindings } from '../dynamic/resultClassifier.js';
+import type { PageReadiness } from '../browser/readiness.js';
 import type { PageDecision } from '../dynamic/types.js';
 import type { EvidenceRef } from '../evidence/store.js';
 
@@ -17,7 +18,7 @@ export interface ReportData {
   incomplete: boolean;
   summary: RunSummary;
   limits: { viewports: string[]; maxPages: number; maxActions: number; maxDepth: number };
-  pages: { url: string; statusCode: number | null; title: string | null; testStatus: string; error: string | null; decision: PageDecision | null }[];
+  pages: { url: string; statusCode: number | null; title: string | null; testStatus: string; error: string | null; decision: PageDecision | null; readiness: PageReadiness | null }[];
   /** Every dynamically selected test that ran, including EXPECTED and BLOCKED_BY_SAFETY outcomes. */
   testResults: TestResultRecord[];
   accessibility: { enabled: boolean; failRun: boolean };
@@ -42,7 +43,10 @@ export const DISCLAIMERS = [
 export function runCounts(db: QADatabase, runId: string): RunCounts {
   const pages = db.listPages(runId);
   const results = db.listTestResults(runId);
-  const problems = countFindings(db.listFindings(runId).filter((f) => f.reviewState !== 'dismissed' && f.track === 'uiux'));
+  const uiux = db.listFindings(runId).filter((f) => f.reviewState !== 'dismissed' && f.track === 'uiux');
+  // the stored label already went through the finding gate (with what is known about the page): count from it
+  const distinct = (cls: string): number => new Set(uiux.filter((f) => f.resultClass === cls).map((f) => f.problemKey)).size;
+  const problems = { bugs: distinct('BUG'), warnings: 0, needsReview: distinct('INCONCLUSIVE') };
   const testable = pages.filter((p) => p.model && (p.statusCode ?? 200) < 400);
   let notTestedElements = 0;
   for (const p of testable) {
@@ -75,9 +79,9 @@ export function summarizeRun(db: QADatabase, runId: string, opts: { incomplete?:
   const summary: RunSummary = {
     pages: db.listPages(runId).filter((p) => p.testStatus === 'tested').length,
     findings: active.length,
-    defects: uiux.filter((f) => f.reviewState === 'defect' || f.reviewState === 'confirmed').length,
-    anomalies: uiux.filter((f) => f.reviewState === 'pending' || f.reviewState === 'investigating').length,
-    counts: countFindings(active),
+    defects: uiux.filter((f) => f.resultClass === 'BUG').length,
+    anomalies: uiux.filter((f) => f.resultClass === 'INCONCLUSIVE').length,
+    counts: { ...countFindings(active), bugs: new Set(uiux.filter((f) => f.resultClass === 'BUG').map((f) => f.problemKey)).size, warnings: 0, needsReview: new Set(uiux.filter((f) => f.resultClass === 'INCONCLUSIVE').map((f) => f.problemKey)).size },
     coverage: runCounts(db, runId),
     byCategory, bySeverity,
     pendingReview: uiux.filter((f) => f.reviewState === 'pending' || f.reviewState === 'investigating').length,
@@ -86,7 +90,11 @@ export function summarizeRun(db: QADatabase, runId: string, opts: { incomplete?:
     visual, incomplete: opts.incomplete,
   };
   const a11y = (db.getRun(runId)?.config as { accessibility?: { failRun?: boolean } } | null)?.accessibility;
-  return { summary, verdict: computeVerdict(findings, { accessibilityFailRun: a11y?.failRun === true }) };
+  // A run that failed to run (target unreachable, authentication required) has not passed anything.
+  if (db.getRun(runId)?.status === 'ERROR') return { summary, verdict: 'FAILED' };
+  // Only CONFIRMED bugs (and, when required, accessibility findings) decide the verdict. Observations never fail a run.
+  const decisive = findings.filter((f) => f.resultClass === 'BUG' || f.track === 'accessibility');
+  return { summary, verdict: computeVerdict(decisive, { accessibilityFailRun: a11y?.failRun === true }) };
 }
 
 export function buildReportData(db: QADatabase, runId: string): ReportData {
@@ -105,7 +113,7 @@ export function buildReportData(db: QADatabase, runId: string): ReportData {
     run: { id: run.id, url: run.url, mode: run.mode, status: run.status, verdict, createdAt: run.createdAt, startedAt: run.startedAt, finishedAt: run.finishedAt, authProfile: run.authProfile, abortReason: run.abortReason, error: run.error },
     incomplete, summary,
     limits: { viewports: (cfg.viewports ?? []).map((v) => v.name), maxPages: cfg.maxPages ?? 0, maxActions: cfg.maxActions ?? 0, maxDepth: cfg.maxDepth ?? 0 },
-    pages: db.listPages(runId).map((p) => ({ url: p.url, statusCode: p.statusCode, title: p.title, testStatus: p.testStatus, error: p.error, decision: p.decision })),
+    pages: db.listPages(runId).map((p) => ({ url: p.url, statusCode: p.statusCode, title: p.title, testStatus: p.testStatus, error: p.error, decision: p.decision, readiness: p.readiness })),
     testResults: db.listTestResults(runId),
     accessibility: { enabled: cfg.accessibility?.enabled !== false, failRun: cfg.accessibility?.failRun === true },
     findings, rulesRun: run.rulesRun, guard: { blockedActions: summary.guardBlocked }, disclaimers: DISCLAIMERS,

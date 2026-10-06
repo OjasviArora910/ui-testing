@@ -18,10 +18,21 @@
   "functional": { "submitValidForms": false, "maxButtonsPerPage": 300, "maxLinksPerPage": 300, "maxFormsPerPage": 30, "maxFieldsPerPage": 150, "allViewports": false },
   "accessibility": { "enabled": false, "keyboard": true, "allViewports": false, "failRun": false },
   "dynamic": { "enabled": true, "maxGenericButtons": 300, "consistencyChecks": false },
-  "network": { "slowRequestMs": 3000 },
+  "network": {
+    "slowRequestMs": 3000,
+    "allowedOrigins": [],
+    "allowedRequests": [
+      { "origin": "https://main.dvl.amp.vg", "method": "POST", "path": "/api/GetFiltersForImages" },
+      { "origin": "https://main.dvl.amp.vg", "method": "POST", "path": "/api/GetImagesForCurrentUser" },
+      { "origin": "https://main.dvl.amp.vg", "method": "POST", "path": "/api/GetRoles" }
+    ]
+  },
   "geometry": { "minTargetSize": 24, "overlapMinRatio": 0.2, "maxElements": 1500 },
   "ai": { "maxCalls": 20, "maxFindingsPerCall": 8, "sendScreenshots": false },
   "agent": { "maxActions": 25, "maxPages": 5, "maxDepth": 3, "maxRuntimeMs": 180000, "maxRepeatedActions": 3, "maxRepeatedStates": 3, "noProgressLimit": 5, "maxLlmCalls": 30 },
+  "workflows": [
+    { "page": "https://main.dvl.amp.vg/#setup/roles", "entryLabels": ["create"], "commitLabels": ["save", "create"], "namePrefix": "QA-Autonomous-", "email": "nikita.dhawan@revclerx.com", "requests": [] }
+  ],
   "paths": { "dataDir": "data", "baselineDir": "data/baselines" },
   "server": { "host": "127.0.0.1", "port": 4000 }
 }

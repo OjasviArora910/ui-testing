@@ -6,6 +6,7 @@ import type { AIAnalysis } from '../ai/schema.js';
 import type { EvidenceRef } from '../evidence/store.js';
 import type { ConsoleEvent, NetworkEvent } from '../browser/types.js';
 import { classifyFinding, problemKey, trackOf } from '../dynamic/resultClassifier.js';
+import type { PageReadiness } from '../browser/readiness.js';
 import type { PageDecision } from '../dynamic/types.js';
 import { fingerprint } from '../rules/helpers.js';
 import type { Redactor } from '../shared/redactor.js';
@@ -99,8 +100,12 @@ export class QADatabase {
     return (this.db.prepare('SELECT * FROM pages WHERE run_id = ? ORDER BY id').all(runId) as Row[]).map((r) => ({
       id: r.id as number, runId: r.run_id as string, url: r.url as string, depth: r.depth as number, statusCode: (r.status_code as number) ?? null,
       title: (r.title as string) ?? null, error: (r.error as string) ?? null, testStatus: r.test_status as PageRecord['testStatus'], model: parse(r.model_json), discoveredAt: r.discovered_at as string,
-      decision: parse<PageDecision>(r.decision_json),
+      decision: parse<PageDecision>(r.decision_json), readiness: parse<PageReadiness>(r.readiness_json),
     }));
+  }
+  /** Saved as soon as the page has loaded, so it is there even if the run is stopped a moment later. */
+  setPageReadiness(runId: string, url: string, readiness: PageReadiness): void {
+    this.db.prepare('UPDATE pages SET readiness_json = ? WHERE run_id = ? AND url = ?').run(this.j(readiness), runId, this.u(url));
   }
   setPageDecision(runId: string, url: string, decision: PageDecision): void {
     this.db.prepare('UPDATE pages SET decision_json = ? WHERE run_id = ? AND url = ?').run(this.j(decision), runId, this.u(url));
@@ -176,11 +181,13 @@ export class QADatabase {
     const rows = this.db.prepare('SELECT * FROM findings WHERE run_id = ? ORDER BY created_at, id').all(runId) as Row[];
     const decisions = new Map<string, DecisionRecord>();
     for (const d of this.listDecisions(runId)) decisions.set(d.findingId, d); // ascending => last wins
+    // pages whose own data requests were blocked or failed: how they looked is not reliable evidence
+    const unreliable = new Set(this.listPages(runId).filter((p) => p.readiness?.state === 'data-not-loaded').map((p) => p.url));
     return rows.map((r) => {
       const f = this.mapFinding(r);
       const decision = decisions.get(f.id) ?? null;
       const reviewState = reviewStateOf(f.classification, decision);
-      return { ...f, decision, reviewState, resultClass: classifyFinding({ ...f, reviewState }), track: trackOf(f), problemKey: problemKey(f) };
+      return { ...f, decision, reviewState, resultClass: classifyFinding({ ...f, reviewState, pageDataNotLoaded: unreliable.has(f.page) }), track: trackOf(f), problemKey: problemKey(f) };
     });
   }
   getFindingView(id: string): FindingView | null {

@@ -46,6 +46,6 @@ export function fmtBox(b: { x: number; y: number; width: number; height: number 
 /** Stable identity of a finding across runs; used for dedupe and baselines of "known" issues. */
 export function fingerprint(f: Finding): string {
   const sel = f.element?.selector ?? '';
-  const path = (() => { try { const u = new URL(f.page); return u.pathname; } catch { return f.page; } })();
+  const path = (() => { try { const u = new URL(f.page); return u.pathname + u.hash; } catch { return f.page; } })();
   return [f.ruleId, path, f.viewport, sel, f.actual.replace(/\d+/g, '#').slice(0, 80)].join('|');
 }

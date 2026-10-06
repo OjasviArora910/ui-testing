@@ -2,6 +2,8 @@ import { elementOf, resetPage, targetFor } from './helpers.js';
 import { classifyElementIntent, toClassifiable } from './intent.js';
 import { clickAndObserve, notInteractable, prepareInteraction } from './interact.js';
 import { capturePreActionSnapshot, traceOf } from './observer.js';
+import { closeOpenedDialog } from './modal.js';
+import { rememberControls, revealedContent, testReversibleControls } from './reversible.js';
 import type { FunctionalContext, FunctionalResult } from './types.js';
 import { verifyInteraction } from './verifier.js';
 
@@ -26,7 +28,7 @@ export async function testButtons(ctx: FunctionalContext): Promise<FunctionalRes
     const intent = classifyElementIntent(toClassifiable(b), model);
 
     // 0. Safety Guard check
-    const decision = guard.check({ kind: 'click', name: b.name, text: b.text, selector: b.selector, role: b.role ?? undefined });
+    const decision = guard.check({ kind: 'click', name: b.name, text: b.text, selector: b.selector, role: b.role ?? undefined, href: b.href });
     if (!decision.allowed) {
       ctx.onAction?.({
         phase: 'RESULT',
@@ -115,6 +117,7 @@ export async function testButtons(ctx: FunctionalContext): Promise<FunctionalRes
     const needScreenshot = Boolean(ctx.onAction || ctx.plan);
 
     // 3. Pre-Action Baseline Capture
+    await rememberControls(c); // so the controls this click reveals can be told apart afterwards
     const pre = await capturePreActionSnapshot(c, b.selector, { captureScreenshot: needScreenshot });
 
     // 4. CLICKING Phase
@@ -184,7 +187,25 @@ export async function testButtons(ctx: FunctionalContext): Promise<FunctionalRes
 
     // Translate verification outcome into functional result
     const proof = { before: pre.screenshot, screenshot: observation.screenshot, trace: traceOf(`click "${label}"`, observation) };
-    if (outcome.verdict === 'BLOCKED') {
+    // An ENTRY control (it opens, shows or edits content) passes only on concrete proof that content was shown: a dialog,
+    // newly visible fields/controls/headings, or another view. "Something changed" is not enough.
+    const isEntry = typeof b.meta?.entry === 'string';
+    const shown = res.ok ? await revealedContent(c) : null;
+    const entryProof = observation.urlChanged ? `another view opened (${c.page.url()})`
+      : shown && (shown.dialog || shown.controls + shown.headings > 0) ? `${shown.dialog ? 'a dialog' : 'new content'} was shown${shown.title ? ` ("${shown.title}")` : ''}: ${shown.controls} control(s), ${shown.headings} heading(s)`
+      : observation.dialogs.opened.length > 0 ? 'a dialog opened' : null;
+    if (isEntry && outcome.verdict === 'PASS' && !entryProof) {
+      push({
+        ...BASE, check: 'entry-open', status: 'inconclusive', severity: 'info', basis: null, element: el, confidence: 'LOW',
+        expected: `"${label}" opens or shows content`, actual: `"${label}" was clicked, but no newly shown content (dialog, panel, fields or heading) could be identified`,
+        details: { reason: outcome.reason, evidence: String(b.meta?.entryEvidence ?? '') }, ...proof,
+      });
+    } else if (isEntry && outcome.verdict === 'PASS') {
+      push({
+        ...BASE, check: 'entry-open', status: 'pass', severity: 'info', basis: null, element: el, confidence: 'HIGH',
+        expected: `"${label}" opens or shows content`, actual: `"${label}" opened: ${entryProof}`, details: { evidence: String(b.meta?.entryEvidence ?? '') },
+      });
+    } else if (outcome.verdict === 'BLOCKED') {
       push({
         ...BASE,
         check: outcome.check,
@@ -245,6 +266,15 @@ export async function testButtons(ctx: FunctionalContext): Promise<FunctionalRes
         durationMs: outcome.evidence?.durationMs,
         confidence: outcome.confidence,
       });
+    }
+
+    // 8. What the click revealed (a dialog, a panel, an editor): its safe, reversible controls are tested in place and
+    // each is put back as it was. No button or link in there is clicked, so nothing is saved or confirmed.
+    if (ctx.plan && res.ok && outcome.verdict !== 'BLOCKED' && outcome.verdict !== 'FAIL' && c.page.url() === pre.rawUrl) {
+      const n = await testReversibleControls(ctx, push, { onlyNew: true, openedBy: label }).catch(() => 0);
+      if (n > 0) pristine = false;
+      // a dialog that this click opened is then closed with its own close control, and the closing is verified
+      if ((shown?.dialog || observation.dialogs.opened.length > 0) && (await closeOpenedDialog(ctx, label, el, push).catch(() => false))) pristine = false;
     }
   }
   return results;

@@ -1,6 +1,9 @@
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { startDemoApp, type DemoServer } from '../demo-app/server.js';
 import { buildPageModel } from '../src/discovery/pageModel.js';
+import { classifyPage, selectTests } from '../src/dynamic/index.js';
 import { ActionGuard, ActionBudget, runFunctionalTests, type FunctionalResult } from '../src/functional/index.js';
 import { loadConfig } from '../src/shared/config.js';
 import { validValue, invalidValue } from '../src/functional/synthetic.js';
@@ -14,6 +17,18 @@ describe('ActionGuard', () => {
   const g = mkGuard();
   it('blocks destructive intent from visible text, accessible name, selector or URL', () => {
     expect(g.check({ kind: 'click', text: 'Delete account' }).allowed).toBe(false);
+    expect(g.check({ kind: 'click', text: 'Create' }).allowed).toBe(false);
+    expect(g.check({ kind: 'click', text: 'C r e a t e', href: 'http://app.test/#' }).allowed).toBe(false);
+    expect(g.check({ kind: 'click', text: 'Save' }).allowed).toBe(false);
+    expect(g.check({ kind: 'click', text: 'Update' }).allowed).toBe(false);
+    expect(g.check({ kind: 'click', text: 'Remove' }).allowed).toBe(false);
+    expect(g.check({ kind: 'click', text: 'Assign' }).allowed).toBe(false);
+    expect(g.check({ kind: 'click', text: 'Publish' }).allowed).toBe(false);
+    expect(g.check({ kind: 'click', text: 'Submit' }).allowed).toBe(false);
+    expect(g.check({ kind: 'click', text: 'Lock Out' }).allowed).toBe(false);
+    expect(g.check({ kind: 'click', text: 'Lockout' }).allowed).toBe(false);
+    expect(g.check({ kind: 'click', text: 'Confirm' }).allowed).toBe(false);
+    expect(g.check({ kind: 'click', text: 'Yes' }).allowed).toBe(false);
     expect(g.check({ kind: 'click', name: 'Buy now' }).allowed).toBe(false);
     expect(g.check({ kind: 'click', text: 'Pay' }).allowed).toBe(false);
     expect(g.check({ kind: 'click', text: 'Continue', selector: '#delete-account' }).allowed).toBe(false);
@@ -25,7 +40,7 @@ describe('ActionGuard', () => {
     expect(g.check({ kind: 'click', text: 'Display settings' }).allowed).toBe(true);
     expect(g.check({ kind: 'click', text: 'Deleted items' }).allowed).toBe(true);
     expect(g.check({ kind: 'click', text: 'Payment history' }).allowed).toBe(true);
-    expect(g.check({ kind: 'click', text: 'Save' }).allowed).toBe(true);
+    expect(g.check({ kind: 'click', text: 'View details' }).allowed).toBe(true);
   });
   it('blocks cross-origin and non-http navigation', () => {
     expect(g.check({ kind: 'navigate', url: 'https://evil.test/' }).allowed).toBe(false);
@@ -58,6 +73,72 @@ describe('synthetic data', () => {
     expect(invalidValue(f({ type: 'number', min: '18' }))).toBe('17');
     expect(invalidValue(f({ type: 'email' }))).toBe('not-an-email');
     expect(invalidValue(f({ type: 'text' }))).toBeNull();
+  });
+});
+
+describe('functional safety gate for discovered mutation controls', () => {
+  let site: http.Server;
+  let siteUrl: string;
+  let c: BrowserController;
+  const hits = { create: 0, spaced: 0, safe: 0 };
+
+  beforeAll(async () => {
+    site = http.createServer((req, res) => {
+      const u = new URL(req.url ?? '/', 'http://x');
+      if (u.pathname === '/clicked-create') { hits.create++; res.end('ok'); return; }
+      if (u.pathname === '/clicked-spaced') { hits.spaced++; res.end('ok'); return; }
+      if (u.pathname === '/clicked-safe') { hits.safe++; res.end('ok'); return; }
+      res.setHeader('content-type', 'text/html');
+      res.end(`<!doctype html><html lang="en"><head><title>Actions</title></head><body><main>
+<h1>Actions</h1>
+<a id="create" href="#" onclick="fetch('/clicked-create'); document.body.dataset.create='1'">Create</a>
+<a id="spaced" href="#" onclick="fetch('/clicked-spaced'); document.body.dataset.spaced='1'"><span>C</span><span>r</span><span>e</span><span>a</span><span>t</span><span>e</span></a>
+<a id="safe" href="#" onclick="fetch('/clicked-safe'); document.getElementById('panel').hidden=false">View details</a>
+<section id="panel" hidden>Details</section>
+</main></body></html>`);
+    });
+    await new Promise<void>((resolve) => site.listen(0, '127.0.0.1', resolve));
+    siteUrl = `http://127.0.0.1:${(site.address() as AddressInfo).port}`;
+    c = await launchForTest({ baseUrl: siteUrl, blockExternal: true });
+  });
+
+  afterAll(async () => {
+    await c?.close();
+    site?.closeAllConnections?.();
+    await new Promise((resolve) => site.close(() => resolve(undefined)));
+  });
+
+  it('discovers Create hash links but ActionGuard blocks them before any click is executed', async () => {
+    const guard = mkGuard(siteUrl);
+    c.setRequestGuard(guard.asRequestGuard());
+    await c.navigate(siteUrl);
+    await c.settle(100);
+    const model = await buildPageModel(c);
+    const profile = classifyPage(model);
+    const plan = selectTests(profile, model, config);
+
+    expect(model.links.find((l) => l.selector === '#create')).toMatchObject({ name: 'Create', visible: true });
+    expect(model.links.find((l) => l.selector === '#spaced')?.name).toBe('Create'); // letter-spaced text is normalised by the page model
+    expect(plan.buttons.map((b) => b.element.selector)).toEqual(expect.arrayContaining(['#create', '#spaced', '#safe']));
+
+    const actions: { type: string; target: string; ok: boolean }[] = [];
+    const results = await runFunctionalTests({
+      controller: c,
+      guard,
+      pageUrl: c.page.url(),
+      model,
+      config,
+      budget: new ActionBudget(30),
+      plan,
+      onAction: (a) => actions.push({ type: a.type, target: a.target, ok: a.ok }),
+    });
+
+    expect(hits.create).toBe(0);
+    expect(hits.spaced).toBe(0);
+    expect(hits.safe).toBe(1);
+    expect(actions.some((a) => a.type === 'click' && /Create|C r e a t e/.test(a.target))).toBe(false);
+    expect(results.filter((r) => r.check === 'guard').map((r) => r.element?.name)).toEqual(expect.arrayContaining(['Create', 'Create']));
+    expect(results.find((r) => r.element?.name === 'View details')?.status).toBe('pass');
   });
 });
 

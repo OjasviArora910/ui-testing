@@ -58,19 +58,19 @@ describe('tracks: a finding is UI/UX or accessibility, never both', () => {
     expect(classifyFinding({ classification: 'defect', severity: 'critical', category: 'accessibility', ruleId: 'plugin.custom-aria-check' })).toBe('ACCESSIBILITY');
   });
 
-  const full = (o: Partial<Finding>): Finding => ({ ruleId: 'functional.button', category: 'functional', severity: 'major', classification: 'defect', basis: 'deterministic', page: 'http://app.test/a', viewport: 'desktop', element: { selector: '#x' }, expected: 'e', actual: 'a', evidence: [], ...o });
+  const full = (o: Partial<Finding>): Finding => ({ ruleId: 'functional.button', category: 'functional', severity: 'major', classification: 'defect', basis: 'deterministic', page: 'http://app.test/a', viewport: 'desktop', element: { selector: '#x' }, expected: 'e', actual: 'a', evidence: ['ev_1'], ...o });
 
   it('counts keep the tracks apart', () => {
     expect(countFindings([
       full({ ruleId: 'a11y.button-name', category: 'accessibility', severity: 'critical' }), full({ ruleId: 'a11y.label', category: 'accessibility', severity: 'minor' }),
       full({ ruleId: 'a11y.keyboard.unreachable', category: 'accessibility', classification: 'anomaly', basis: null }),
       full({}), full({ ruleId: 'image.distorted', category: 'layout', severity: 'minor' }), full({ ruleId: 'geometry.overlap', category: 'layout', classification: 'anomaly', basis: null }),
-    ])).toEqual({ bugs: 1, warnings: 1, needsReview: 1, accessibility: 2, accessibilityNeedsReview: 1 });
+    ])).toEqual({ bugs: 2, warnings: 0, needsReview: 1, accessibility: 2, accessibilityNeedsReview: 1 }); // a confirmed bug is a bug whatever its severity; an anomaly is an observation
   });
 });
 
 describe('one underlying problem is reported once', () => {
-  const full = (o: Partial<Finding>): Finding => ({ ruleId: 'functional.button', category: 'functional', severity: 'major', classification: 'defect', basis: 'deterministic', page: 'http://app.test/a', viewport: 'desktop', element: { selector: '#x' }, expected: 'e', actual: 'a', evidence: [], ...o });
+  const full = (o: Partial<Finding>): Finding => ({ ruleId: 'functional.button', category: 'functional', severity: 'major', classification: 'defect', basis: 'deterministic', page: 'http://app.test/a', viewport: 'desktop', element: { selector: '#x' }, expected: 'e', actual: 'a', evidence: ['ev_1'], ...o });
 
   it('several controls failing on the same request are one problem with several occurrences', () => {
     const fail = (name: string, page: string) => full({ page, element: { selector: `#${name}`, name }, actual: `[network-failure] Network failure: GET http://app.test/api/orders returned HTTP 500` });
@@ -110,7 +110,7 @@ describe('one underlying problem is reported once', () => {
     const msg = 'Modal opened by "X" ignores Escape; it only closes through its "Close" control';
     const groups = groupProblems([full({ ruleId: 'functional.modal', severity: 'minor', actual: msg, element: { selector: '#a' } }), full({ ruleId: 'functional.modal', severity: 'minor', actual: msg.replace('"X"', '"Y"'), element: { selector: '#b' } })]);
     expect(groups).toHaveLength(1);
-    expect(groups[0]).toMatchObject({ resultClass: 'WARNING' });
+    expect(groups[0]).toMatchObject({ resultClass: 'BUG' });
   });
 });
 
@@ -184,7 +184,7 @@ describe('working UI with accessibility problems (browser)', () => {
     const data = buildReportData(db, runId);
     const html = renderHtml(data);
     expect(html).toMatch(/Accessibility findings \(separate from UI\/UX bugs/);
-    expect(html).toMatch(/UI\/UX bugs and warnings \(confirmed by a rule or a human\) \(0\)/);
+    expect(html).toMatch(/CONFIRMED UI\/UX BUGS \(0\)/);
     expect(html).toMatch(/>ACCESSIBILITY<\/span>[^<]*<span[^>]*>critical<\/span> <strong>a11y\.button-name/);
     expect(html).not.toMatch(/>BUG<\/span>/);
     expect(renderJUnit(data)).toMatch(/<testsuites name="qa-platform" tests="\d+" failures="0"/);

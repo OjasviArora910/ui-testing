@@ -12,6 +12,7 @@ Usage:
   qa demo    [--port 3000]                        Start the intentionally broken demo app
   qa run     --url <url> [--token-env VAR --token-location cookie|localStorage|sessionStorage|header [--token-key K]] | [--profile <name>]
              [--mode deterministic|ai_assisted|exploratory]
+             [--page-only]                           Test only this exact URL (no crawl)
              [--max-pages N] [--max-depth N] [--max-actions N] [--viewports desktop,tablet,mobile]
                                                   Run one test headlessly; exit code 0=PASS/WARN, 1=FAILED, 2=BLOCKED_PENDING_REVIEW, 3=error
   qa runs                                         List recent runs
@@ -100,7 +101,7 @@ async function main(): Promise<number> {
       if (flags['max-depth']) overrides.maxDepth = Number(flags['max-depth']);
       if (flags['max-actions']) overrides.maxActions = Number(flags['max-actions']);
       const auth = tokenFromEnv(flags);
-      const req = RunRequestSchema.safeParse({ url: flags.url, ...(auth ? { auth } : {}), authProfile: flags.profile, mode: mode.data, ...(vps?.length ? { viewports: vps } : {}), ...(Object.keys(overrides).length ? { overrides } : {}) });
+      const req = RunRequestSchema.safeParse({ url: flags.url, ...(flags['page-only'] ? { scope: 'page' } : {}), ...(auth ? { auth } : {}), authProfile: flags.profile, mode: mode.data, ...(vps?.length ? { viewports: vps } : {}), ...(Object.keys(overrides).length ? { overrides } : {}) });
       if (!req.success) { console.error(`Invalid arguments: ${req.error.issues.map((i) => `${i.path.join('.') || 'url'}: ${i.message}`).join('; ')}`); return 3; }
       runId = orch.start(req.data).id;
     }

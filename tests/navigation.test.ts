@@ -23,6 +23,8 @@ describe('navigation is robust against resources that keep loading', () => {
       if (p === '/hanging-image') return html(page('', '<img src="/never.png" alt="never loads">'));
       if (p === '/slow-head-script') return html(page('<script src="/slow.js"></script>', '<p>content after a slow script</p>'));
       if (p === '/next') return html(page('', '<p>second page</p>'));
+      // a page that sets a session cookie and then locks up its own tab (a script that never yields)
+      if (p === '/hangs') return html(page('<script>document.cookie = "sid=keep-me; path=/"; setTimeout(() => { for (;;) { /* spin */ } }, 300);</script>', '<p>about to hang</p>'));
       if (p === '/never.png' || p === '/no-response') { hanging.push(res); return; } // never answered
       // parser-blocking script that arrives AFTER the navigation timeout, like a slow vendor bundle
       if (p === '/slow.js') { setTimeout(() => { res.setHeader('content-type', 'text/javascript'); res.end('window.slowLoaded = true;'); }, NAV_TIMEOUT + 500); return; }
@@ -65,6 +67,17 @@ describe('navigation is robust against resources that keep loading', () => {
     expect(pages.every((p) => p.model !== null && !p.error)).toBe(true);
     expect(pages[0]!.model!.images).toHaveLength(1);
   });
+
+  it('a hung tab does not make every following page unreachable: the next page opens in a fresh tab, session kept', async () => {
+    expect((await c.navigate(`${url}/hangs`)).ok).toBe(true);
+    await new Promise((r) => setTimeout(r, 800)); // the tab is now spinning and answers nothing
+    const nav = await c.navigate(`${url}/next`);
+    expect(nav).toMatchObject({ ok: true, status: 200 });
+    expect(await c.page.textContent('p')).toBe('second page');
+    expect(await c.page.evaluate('document.cookie')).toContain('sid=keep-me'); // same browser session
+    // and the controller keeps working normally afterwards
+    expect((await c.navigate(`${url}/next`)).ok).toBe(true);
+  }, 60_000);
 
   it('a server that never answers is still a real failure', async () => {
     const nav = await c.navigate(`${url}/no-response`);

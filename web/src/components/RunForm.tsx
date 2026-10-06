@@ -32,6 +32,7 @@ export function RunForm({
   const [mode, setMode] = useState<Mode>(config.aiConfigured ? 'ai_assisted' : 'deterministic');
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [limits, setLimits] = useState({ maxPages: '', maxDepth: '', maxActions: '' });
+  const [pageOnly, setPageOnly] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -71,6 +72,7 @@ export function RunForm({
 
       const { runId } = await api.start({
         url: trimmed,
+        scope: pageOnly ? 'page' : 'site',
         mode,
         viewports: [{ name: 'desktop', width: 1440, height: 900 }],
         ...(auth ? { auth } : {}),
@@ -121,6 +123,16 @@ export function RunForm({
             </span>
           )}
         </div>
+
+        <label className="scope-toggle" htmlFor="page-only">
+          <input id="page-only" type="checkbox" checked={pageOnly} onChange={(e) => setPageOnly(e.target.checked)} />
+          <span>
+            <strong>Test this page only</strong>
+            <span className="scope-toggle-hint">
+              {pageOnly ? 'Only the exact URL above is tested. No other page is crawled or tested.' : 'Unchecked: the site is crawled from this URL and every page found is tested.'}
+            </span>
+          </span>
+        </label>
 
         {/* Quick URL Chips */}
         <div className="quick-chips">

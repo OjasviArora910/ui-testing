@@ -173,4 +173,7 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE test_results_v2 RENAME TO test_results;
   CREATE INDEX idx_test_results_run ON test_results(run_id);
   `,
+  `
+  ALTER TABLE pages ADD COLUMN readiness_json TEXT;
+  `,
 ];

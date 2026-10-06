@@ -4,11 +4,12 @@ import { runAxe, runKeyboardCheck } from '../accessibility/index.js';
 import type { AIProvider } from '../ai/index.js';
 import { analyzeFindings, buildDigest } from '../ai/index.js';
 import { ReactAgent } from '../agent/index.js';
-import { BrowserController, type BrowserControllerOptions } from '../browser/index.js';
+import { BrowserController, buildReadiness, loadProfile, type BrowserControllerOptions } from '../browser/index.js';
 import type { QADatabase } from '../database/db.js';
 import type { RunRecord, RunState, RunStatus } from '../database/types.js';
-import { crawl } from '../discovery/crawler.js';
+import { crawl, isHashRoute } from '../discovery/crawler.js';
 import { buildPageModel } from '../discovery/pageModel.js';
+import { shellSelectors, withoutShell } from '../discovery/shell.js';
 import type { PageModel } from '../discovery/types.js';
 import { classifyPage, classifyResult, controlKey, sameRootCause, selectTests, type TestPlan } from '../dynamic/index.js';
 import { captureHighlightedElementScreenshot, capturePageEvidence, evidenceFor, type EvidenceRef, type EvidenceStore, type PageEvidence } from '../evidence/index.js';
@@ -81,6 +82,8 @@ export class RunExecutor {
   private budget!: ActionBudget;
   private testedLinks = new Set<string>();
   private verifiedControls = new Set<string>();
+  /** The requested page as loaded and verified at the start of the run (used by single-page scope). */
+  private landing?: { model: PageModel; status?: number };
 
   constructor(private readonly deps: ExecutorDeps, private readonly runId: string, private readonly hooks: ExecutorHooks) { this.db = deps.db; }
 
@@ -250,10 +253,14 @@ export class RunExecutor {
     this.controller = await BrowserController.launch({
       baseUrl: this.request.url, viewport: first, auth, redactor: this.deps.redactor, ignoredEndpoints: this.config.ignoredEndpoints,
       actionTimeoutMs: this.config.timeouts.actionMs, navigationTimeoutMs: this.config.timeouts.navigationMs,
-      blockExternal: true, ...this.deps.launch, trace,
+      blockExternal: true, allowedOrigins: this.config.network?.allowedOrigins ?? [], ...this.deps.launch, trace,
     });
     this.check(); // a stop requested while the browser was starting
-    this.guard = new ActionGuard({ keywords: this.config.dangerousActions.keywords, allowMethods: this.config.dangerousActions.allowMethods, origin: this.request.url });
+    this.guard = new ActionGuard({
+      keywords: this.config.dangerousActions.keywords, allowMethods: this.config.dangerousActions.allowMethods, origin: this.request.url,
+      allowedRequests: this.config.network?.allowedRequests ?? [],
+    });
+    for (const r of this.guard.rejectedAllowRules) this.hooks.emit('warning', `allow-list entry ${r.rule.method} ${r.rule.path} ignored: ${r.reason}`);
     this.controller.setRequestGuard(this.guard.asRequestGuard());
 
     const nav = await this.controller.navigate(this.request.url);
@@ -263,6 +270,24 @@ export class RunExecutor {
       throw new Error(`PAGE UNREACHABLE: ${this.request.url} could not be opened (${nav.error}). Nothing was tested.`);
     }
     if (nav.partial) this.hooks.emit('warning', `${this.request.url} is usable but did not finish loading within ${Math.round(this.config.timeouts.navigationMs / 1000)}s (a resource is still pending); continuing with the loaded document.`);
+    // Verify that the page we were asked to test is the page we are on, BEFORE any testing. A single-page app routes (and
+    // redirects to its login screen) after the document has loaded, so let it settle first.
+    await this.controller.waitForIdle(4000);
+    const landed = this.controller.page.url();
+    const landedModel = await buildPageModel(this.controller, { status: nav.status });
+    if (this.isLoginRedirect(landedModel, this.request.url, landed)) {
+      const where = (() => { try { return new URL(landed).pathname; } catch { return landed; } })();
+      throw new Error(`Authentication required to test this page: the application sent the browser to its login page (${where}) instead of ${this.request.url}. `
+        + (auth ? `It did not accept ${authLabel}: check that the cookie/storage name is the one the application reads and that the token has not expired. ` : 'Supply a session token in the Login section (the place and name the application reads it from). ')
+        + 'Nothing was tested: the login page is not the page you asked for.');
+    }
+    this.landing = { model: landedModel, status: nav.status };
+    this.hooks.emit('log', `Target loaded: ${this.controller.url} ("${landedModel.title}")`);
+    // Requests to other hosts that are not static files stay blocked. Say which, so an application that needs one of them
+    // (its API on another host) can be given it explicitly in network.allowedOrigins.
+    const origin = new URL(this.request.url).origin;
+    const blockedHosts = [...new Set(this.controller.events.network.filter((n) => n.blockedByGuard && !n.url.startsWith(origin) && ['xhr', 'fetch', 'websocket', 'document', 'other'].includes(n.resourceType)).map((n) => { try { return new URL(n.url).origin; } catch { return ''; } }).filter(Boolean))];
+    if (blockedHosts.length > 0) this.hooks.emit('warning', `Requests to other hosts were blocked (${blockedHosts.slice(0, 5).join(', ')}). If the application needs one of them to work, add it to network.allowedOrigins in qa.config.json.`);
     const initBuf = await this.controller.page.screenshot({ type: 'jpeg', quality: 65 }).catch(() => null);
     if (initBuf) {
       this.hooks.setFrame?.({ url: this.request.url, viewport: first.name, action: `loaded ${this.request.url}`, buffer: initBuf });
@@ -274,6 +299,20 @@ export class RunExecutor {
       this.hooks.emit('warning', `Credentials rejected: ${authLabel} got HTTP ${nav.status}. The token may be expired or placed in the wrong location.`);
     }
     this.action('auth', 'navigate', this.request.url, true, `HTTP ${nav.status ?? '?'}`);
+  }
+
+  /**
+   * The browser asked for one page and is showing a login form at a different address: the application wants
+   * authentication. (A login page that was requested on purpose is just a page to test.)
+   */
+  private isLoginRedirect(model: PageModel, requested: string, landed: string): boolean {
+    let req: URL; let got: URL;
+    try { req = new URL(requested); got = new URL(landed); } catch { return false; }
+    const trim = (p: string): string => p.replace(/\/+$/, '');
+    const moved = trim(req.pathname) !== trim(got.pathname) || ((isHashRoute(req.hash) || isHashRoute(got.hash)) && req.hash !== got.hash);
+    if (!moved) return false;
+    if (/log-?in|sign-?in|sso|auth/i.test(req.pathname + req.hash)) return false;
+    return classifyPage(model).types.some((t) => t.type === 'LOGIN_AUTH' && t.confidence === 'HIGH');
   }
 
   private unreachable(url: string, viewport: string, error?: string): void {
@@ -293,6 +332,16 @@ export class RunExecutor {
   // ------------------------------------------------------------------ 2. discover
   private async discover(): Promise<void> {
     const c = this.controller!;
+    if (!this.state.crawlDone && this.request.scope === 'page') {
+      // Single-page scope: the page to test is the URL exactly as entered. No crawl, no queue, no other page.
+      this.check();
+      const url = this.request.url;
+      this.db.upsertPage(this.runId, { url, depth: 0, statusCode: this.landing?.status ?? null, title: this.landing?.model.title ?? null, model: this.landing?.model, testStatus: 'pending' });
+      this.state.crawl = { visited: [url], queue: [] };
+      this.state.crawlDone = true; this.save();
+      this.snap.currentPage = url; this.snap.pagesDiscovered = 1; this.snap.counts = runCounts(this.db, this.runId);
+      this.hooks.emit('page', `testing this page only: ${url}`);
+    }
     if (!this.state.crawlDone) {
       this.check();
       this.setStatus('DISCOVERING');
@@ -300,10 +349,12 @@ export class RunExecutor {
         startUrl: this.request.url, maxPages: this.config.maxPages, maxDepth: this.config.maxDepth, initial: this.state.crawl,
         allowLink: (l) => this.guard.check({ kind: 'navigate', url: l.href, text: l.text, selector: l.selector }).allowed,
         shouldStop: () => this.hooks.signal.aborted,
+        isLoginRedirect: (m, requested, landedAt) => this.isLoginRedirect(m, requested, landedAt),
         onPage: async (p, st) => {
           this.db.upsertPage(this.runId, { url: p.url, depth: p.depth, statusCode: p.status ?? null, title: p.model?.title ?? null, error: p.error ?? null, model: p.model ?? undefined, testStatus: p.model ? 'pending' : 'skipped' });
           this.state.crawl = st; this.save();
           this.snap.currentPage = p.url; this.snap.pagesDiscovered = st.visited.length;
+          this.snap.counts = runCounts(this.db, this.runId); // the page count is visible while pages are still being found
           this.hooks.emit('page', `discovered ${p.url}`, { status: p.status, depth: p.depth });
           const crawlBuf = await c.page.screenshot({ type: 'jpeg', quality: 65 }).catch(() => null);
           if (crawlBuf) {
@@ -311,6 +362,8 @@ export class RunExecutor {
             this.hooks.emit('frame', `frame @ ${p.url}`, { url: p.url, viewport: this.config.viewports[0]?.name || 'desktop' });
           }
           this.action('crawler', 'visit', p.url, !p.error, p.error, p.url);
+          // what the safety guard stopped while this page loaded (for example data the page asked for with POST)
+          for (const g of this.guard.log.splice(0)) if (!g.decision.allowed) this.action('guard', 'blocked', `${g.action.kind} ${g.action.method ?? ''} ${g.action.url ?? g.action.text ?? g.action.name ?? g.action.selector ?? ''}`.trim(), false, g.decision.reason, p.url);
           if (p.depth === 0 && (p.status ?? 0) >= 400) {
             this.insertSimple({ ruleId: 'navigation.http-error', category: 'network', severity: 'major', classification: 'defect', basis: 'deterministic', page: p.url, viewport: this.config.viewports[0]!.name, element: null,
               expected: 'The start URL loads successfully', actual: `GET ${p.url} returned HTTP ${p.status}`, evidence: [] });
@@ -341,7 +394,7 @@ export class RunExecutor {
         if (this.state.testedUnits.includes(unit)) continue;
         this.snap.currentPage = page.url; this.snap.currentViewport = vp.name;
         this.hooks.emit('page', `testing ${page.url} @ ${vp.name}`);
-        try { await this.testUnit(c, page.url, vp, vp === viewports[0], visual); } catch (e) {
+        try { await this.testUnit(c, this.request.scope === 'page' ? this.request.url : page.url, vp, vp === viewports[0], visual); } catch (e) {
           if (e instanceof StopRun) throw e;
           this.check(); // stopped mid-unit: leave it untested so a resume repeats it
           this.hooks.emit('warning', `Unit ${unit} failed: ${errMsg(e)}`);
@@ -357,7 +410,8 @@ export class RunExecutor {
   private async testUnit(c: BrowserController, url: string, vp: Viewport, isFirst: boolean, visual: VisualTester): Promise<void> {
     const cfg = this.config;
     await c.setViewport(vp);
-    const n0 = c.events.network.length; const k0 = c.events.console.length;
+    const n0 = c.events.network.length; const k0 = c.events.console.length; const navAt = Date.now();
+    c.pageLoadProfile = null; // a new page: its load pattern is not known yet
     const nav = await c.navigate(url);
     this.action('orchestrator', 'navigate', url, nav.ok, nav.error ?? (nav.partial ? 'usable, but the page did not finish loading' : undefined), url, vp.name);
     if (!nav.ok) { this.unreachable(url, vp.name, nav.error); return; }
@@ -368,6 +422,19 @@ export class RunExecutor {
     }
     // Let page-load requests finish (bounded) so slow and failing APIs are observed with their real duration/status.
     await c.waitForIdle(cfg.network.slowRequestMs + 1000);
+    if (isFirst) {
+      // Page readiness: what the page asked for while loading and what became of it. Saved immediately, before any testing,
+      // so it survives a stop, and so that a page whose data never arrived is understood as that and not as broken UI.
+      await c.waitForPageLoad({ learn: true }); // first load of this page: learn what it requests
+      // the read-only data endpoints the operator has declared (the allow-list) are the page's required data
+      const declared = (cfg.network?.allowedRequests ?? []).map((r) => `${r.method.toUpperCase()} ${r.origin.replace(/\/$/, '')}${r.path}`);
+      const readiness = await buildReadiness(c, { url, networkFrom: n0, consoleFrom: k0, navStartedAt: navAt, declared });
+      this.db.setPageReadiness(this.runId, url, readiness);
+      c.pageLoadProfile = loadProfile(readiness);
+      this.hooks.emit('page', `page readiness: ${readiness.state}`, { readiness: { url, state: readiness.state, summary: readiness.summary } });
+      if (readiness.state === 'data-not-loaded') this.hooks.emit('warning', `${url}: ${readiness.summary}`);
+      else this.hooks.emit('log', `${url}: ${readiness.summary}`);
+    }
     const network = c.events.network.slice(n0); const consoleEv = c.events.console.slice(k0);
     const model = await buildPageModel(c, { status: nav.status });
     this.check();
@@ -413,11 +480,18 @@ export class RunExecutor {
 
     // ---- 2. Interactions: every element is tested once and its result is saved the moment it finishes.
     if (isFirst || cfg.functional.allViewports) {
-      const plan = cfg.dynamic?.enabled ? this.planFor(url, vp.name, model) : undefined;
+      // "This page only": the application's global navigation (shown on every page) is not part of the page under test.
+      let tested = model;
+      if (this.request.scope === 'page') {
+        const shell = await shellSelectors(c, model);
+        tested = withoutShell(model, shell);
+        if (shell.size > 0) this.hooks.emit('log', `${url}: ${shell.size} global navigation control(s) SKIPPED: they are not part of the page under test (page-only scope)`);
+      }
+      const plan = cfg.dynamic?.enabled ? this.planFor(url, vp.name, tested) : undefined;
       const needCapture: { id: string; finding: Finding }[] = [];
       this.snap.currentAction = 'testing elements';
       const functional = await runFunctionalTests({
-        controller: c, guard: this.guard, pageUrl: url, model, config: cfg, budget: this.budget, testedLinks: this.testedLinks, plan,
+        controller: c, guard: this.guard, pageUrl: url, model: tested, config: cfg, budget: this.budget, testedLinks: this.testedLinks, plan, pageOnly: this.request.scope === 'page', workflow: this.workflowFor(url),
         onResult: (r) => this.recordResult(url, vp, r, needCapture),
         onAction: (a) => {
           if (a.buffer) {
@@ -486,6 +560,17 @@ export class RunExecutor {
   }
 
   /** Detection -> selection for one page. The decision is persisted and streamed so the report and dashboard can show it. */
+  /** The controlled creation authorized for exactly this page, if any (config `workflows`); only in "this page only" runs. */
+  private workflowFor(url: string): import('../functional/workflow.js').WorkflowPolicy | undefined {
+    if (this.request.scope !== 'page') return undefined;
+    const same = (a: string, b: string): boolean => { try { return new URL(a).toString() === new URL(b).toString(); } catch { return false; } };
+    const w = (this.config.workflows ?? []).find((x) => same(x.page, url) && same(x.page, this.request.url));
+    if (!w) return undefined;
+    const name = `${w.namePrefix}${this.runId.replace(/^run_/, '')}`;
+    this.hooks.emit('log', `${url}: a controlled creation workflow is authorized for this page; it runs after the generic tests and creates at most one record, "${name}"`);
+    return { page: w.page, entryLabels: w.entryLabels, commitLabels: w.commitLabels, email: w.email, requests: w.requests, name };
+  }
+
   private planFor(url: string, viewport: string, model: PageModel): TestPlan {
     const profile = classifyPage(model);
     const plan = selectTests(profile, model, this.config, { verified: this.verifiedControls });

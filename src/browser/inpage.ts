@@ -2,6 +2,8 @@
  * Scripts executed inside the page. Kept as plain-JS strings (not functions) so bundler helpers
  * such as esbuild's __name never leak into the browser context.
  */
+import { ENTRY_HELPERS_JS } from './entryEvidence.js';
+
 export const COLLECT_ELEMENTS_SCRIPT = `(mode) => {
   const IMPLICIT = { button:'button', select:'combobox', textarea:'textbox', img:'img', table:'table', nav:'navigation',
     main:'main', header:'banner', footer:'contentinfo', dialog:'dialog', ul:'list', ol:'list', li:'listitem', form:'form',
@@ -13,6 +15,7 @@ export const COLLECT_ELEMENTS_SCRIPT = `(mode) => {
     'backgroundColor','fontSize','fontWeight','textOverflow','whiteSpace','pointerEvents','cursor','webkitLineClamp','clip','clipPath','width','height','flexWrap','objectFit'];
   const INTERACTIVE_SEL = 'a[href],button,input:not([type=hidden]),select,textarea,summary,[contenteditable=""],[contenteditable="true"],'
     + '[tabindex]:not([tabindex^="-"]),[role=button],[role=link],[role=tab],[role=menuitem],[role=checkbox],[role=radio],[role=switch],[role=combobox],[role=option]';
+  ${ENTRY_HELPERS_JS}
   const roleOf = (el) => {
     const explicit = el.getAttribute('role'); if (explicit) return explicit.split(' ')[0];
     const tag = el.tagName.toLowerCase();
@@ -21,6 +24,10 @@ export const COLLECT_ELEMENTS_SCRIPT = `(mode) => {
     return IMPLICIT[tag] || null;
   };
   const textOf = (el) => (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 200);
+  const entryCache = new Map();
+  const entryOf = (el, cs) => { if (!entryCache.has(el)) entryCache.set(el, eEntryOf(el, cs || getComputedStyle(el))); return entryCache.get(el); };
+  const safeEntryName = (el) => { const e = entryOf(el); return e.kind ? e.name : ''; };
+  const isSafeEntryAffordance = (el, cs) => !!entryOf(el, cs).kind;
   const nameOf = (el) => {
     const aria = el.getAttribute('aria-label'); if (aria) return aria.trim();
     const lb = el.getAttribute('aria-labelledby');
@@ -29,6 +36,7 @@ export const COLLECT_ELEMENTS_SCRIPT = `(mode) => {
     if (el.tagName === 'IMG') { const alt = el.getAttribute('alt'); if (alt !== null) return alt.trim(); }
     if (el.tagName === 'INPUT' && ['button','submit','reset'].includes((el.getAttribute('type')||'').toLowerCase())) return (el.value || '').trim();
     const txt = textOf(el); if (txt) return txt;
+    const safe = safeEntryName(el); if (safe) return safe;
     return (el.getAttribute('title') || el.getAttribute('placeholder') || '').trim();
   };
   const esc = (s) => (window.CSS && CSS.escape) ? CSS.escape(s) : s.replace(/[^a-zA-Z0-9_-]/g, '\\\\$&');
@@ -54,8 +62,8 @@ export const COLLECT_ELEMENTS_SCRIPT = `(mode) => {
   for (const el of nodes) {
     const tag = el.tagName.toLowerCase();
     if (['script','style','noscript','template','head','meta','link','title'].includes(tag)) continue;
-    if (mode === 'interactive' && !el.matches(INTERACTIVE_SEL)) continue;
     const rect = el.getBoundingClientRect(); const cs = getComputedStyle(el);
+    if (mode === 'interactive' && !el.matches(INTERACTIVE_SEL) && !isSafeEntryAffordance(el, cs)) continue;
     const visible = visibleOf(el, rect, cs);
     if (mode === 'visible' && !visible) continue;
     const styles = {}; for (const k of STYLE_KEYS) styles[k] = cs[k];
@@ -77,6 +85,7 @@ export const COLLECT_ELEMENTS_SCRIPT = `(mode) => {
       styles,
       scroll: { scrollWidth: el.scrollWidth, clientWidth: el.clientWidth, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight },
       href: tag === 'a' ? el.getAttribute('href') : undefined,
+      entry: (mode === 'interactive' && !el.matches(INTERACTIVE_SEL) && entryOf(el, cs).kind) ? { kind: entryOf(el, cs).kind, evidence: entryOf(el, cs).evidence } : undefined,
       required: el.required === true || undefined,
     });
     if (out.length >= 5000) break;

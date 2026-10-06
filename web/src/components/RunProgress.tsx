@@ -12,12 +12,12 @@ interface RunProgressProps {
   stopping?: boolean;
 }
 
-const OUTCOME_LABEL: Record<string, string> = { EXPECTED: 'PASS', BUG: 'BUG', WARNING: 'WARNING', NEEDS_REVIEW: 'NEEDS REVIEW', BLOCKED_BY_SAFETY: 'BLOCKED', INCONCLUSIVE: 'NO EFFECT' };
+const OUTCOME_LABEL: Record<string, string> = { EXPECTED: 'PASS', BUG: 'CONFIRMED BUG', WARNING: 'CONFIRMED BUG', NEEDS_REVIEW: 'INCONCLUSIVE', BLOCKED_BY_SAFETY: 'BLOCKED', INCONCLUSIVE: 'INCONCLUSIVE' };
 const pathOf = (u: string | null | undefined): string => {
   if (!u) return '';
   try {
     const x = new URL(u);
-    return x.pathname + x.search;
+    return x.pathname + x.search + x.hash;
   } catch {
     return u;
   }

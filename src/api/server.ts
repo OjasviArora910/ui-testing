@@ -52,7 +52,7 @@ export function createApiServer(platform: Platform, opts: ApiOptions = {}): http
     const run = db.getRun(runId);
     if (!run) throw new HttpError(404, 'Run not found');
     return {
-      id: run.id, url: run.url, mode: run.mode, status: run.status, verdict: run.verdict, authProfile: run.authProfile, auth: orch.authInfo(runId), createdAt: run.createdAt, startedAt: run.startedAt,
+      id: run.id, url: run.url, scope: (run.request as { scope?: string } | null)?.scope ?? 'site', mode: run.mode, status: run.status, verdict: run.verdict, authProfile: run.authProfile, auth: orch.authInfo(runId), createdAt: run.createdAt, startedAt: run.startedAt,
       finishedAt: run.finishedAt, error: run.error, abortReason: run.abortReason, summary: run.summary, active: orch.isActive(runId),
       interrupted: !orch.isActive(runId) && !['COMPLETED', 'ABORTED', 'ERROR', 'REVIEW'].includes(run.status),
       progress: orch.snapshot(runId),
@@ -191,6 +191,10 @@ export function createApiServer(platform: Platform, opts: ApiOptions = {}): http
           results: db.listTestResults(runId),
           accessibility: { enabled: a11y?.enabled !== false, failRun: a11y?.failRun === true },
         });
+      }
+      if (sub === 'readiness' && m === 'GET') {
+        if (!db.getRun(runId)) throw new HttpError(404, 'Run not found');
+        return send(res, 200, { pages: db.listPages(runId).filter((pg) => pg.readiness).map((pg) => ({ url: pg.url, title: pg.title, readiness: pg.readiness })) });
       }
       if (sub === 'actions' && m === 'GET') return send(res, 200, { actions: db.listActions(runId).slice(-500) });
       if (sub === 'simulation' && m === 'GET') {

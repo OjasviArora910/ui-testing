@@ -103,7 +103,7 @@ const DECISIONS: { d: Decision; label: string; cls: string; desc: string }[] = [
 const pathOf = (u: string) => {
   try {
     const x = new URL(u);
-    return x.pathname + x.search;
+    return x.pathname + x.search + x.hash;
   } catch {
     return u;
   }
@@ -177,7 +177,7 @@ export function FindingCard({
           {isA11y ? (
             <span className="result-class rc-ACCESSIBILITY">Accessibility</span>
           ) : f.resultClass ? (
-            <span className={`result-class rc-${f.resultClass}`}>{f.resultClass.replace(/_/g, ' ').toLowerCase()}</span>
+            <span className={`result-class rc-${f.resultClass}`}>{f.resultClass === 'BUG' ? 'confirmed bug' : f.resultClass.replace(/_/g, ' ').toLowerCase()}</span>
           ) : null}
           <span className="category-pill">{f.category}</span>
           <span className="finding-rule-title">{f.ruleId}</span>

@@ -3,8 +3,9 @@ import { Redactor } from '../shared/redactor.js';
 import type { AuthConfig, BoundingBox, Viewport } from '../shared/types.js';
 import { applyAuth } from './auth.js';
 import { EventCollector } from './collectors.js';
+import { COLLECT_ROW_CANDIDATES_SCRIPT } from './entryEvidence.js';
 import { COLLECT_ELEMENTS_SCRIPT, COLLECT_STRUCTURE_SCRIPT } from './inpage.js';
-import type { ActionResult, ElementInfo, ElementTarget, RawStructure } from './types.js';
+import type { ActionResult, ElementInfo, ElementTarget, RawStructure, RequestPhase, RowCandidate } from './types.js';
 
 export interface BrowserControllerOptions {
   baseUrl: string;
@@ -18,8 +19,14 @@ export interface BrowserControllerOptions {
   executablePath?: string;
   launchArgs?: string[];
   headless?: boolean;
-  /** Same-origin only: requests to other origins are aborted when true. */
+  /**
+   * When true, the browser stays on the target origin: navigation, frames, XHR/fetch, websockets and anything else to another
+   * origin are aborted. The one exception is static page resources (stylesheet, script, image, font, media) requested with
+   * GET, which a page needs in order to render and run and which are routinely served from a CDN on another host.
+   */
   blockExternal?: boolean;
+  /** Extra origins the page may talk to (for example the application's own API host). Write methods stay blocked by the request guard. */
+  allowedOrigins?: string[];
   trace?: boolean;
 }
 
@@ -33,10 +40,10 @@ export class BrowserController {
   private _page!: Page;
   private _viewport: Viewport;
   private tracing = false;
-  private requestGuard: ((req: { method: string; url: string }) => boolean) | null = null;
+  private requestGuard: ((req: { method: string; url: string }) => boolean | string) | null = null;
   private lastStatus: number | undefined;
   /** Requests aborted by the request guard (method + redacted url). They are not application failures. */
-  readonly blockedRequests: { method: string; url: string }[] = [];
+  readonly blockedRequests: { method: string; url: string; at: number; phase: RequestPhase; reason: string }[] = [];
   /** Native alert/confirm/prompt dialogs the page opened (dismissed automatically). Opening one is an observable result of an action. */
   readonly jsDialogs: { type: string; message: string }[] = [];
   /** Popup windows/tabs the page opened (closed automatically; the run stays on the page under test). */
@@ -63,32 +70,75 @@ export class BrowserController {
     await applyAuth(this.context, this.opts.baseUrl, this.opts.auth, this.redactor);
     if (this.opts.blockExternal) {
       const origin = new URL(this.opts.baseUrl).origin;
+      const allowed = new Set([origin, ...(this.opts.allowedOrigins ?? []).map((o) => { try { return new URL(o).origin; } catch { return o; } })]);
+      const STATIC = new Set(['stylesheet', 'script', 'image', 'font', 'media']);
       await this.context.route('**/*', (route) => {
-        const u = route.request().url();
-        return u.startsWith('data:') || u.startsWith('blob:') || u.startsWith(origin) ? route.fallback() : route.abort('blockedbyclient');
+        const req = route.request(); const u = req.url();
+        if (u.startsWith('data:') || u.startsWith('blob:')) return route.fallback();
+        let target = ''; try { target = new URL(u).origin; } catch { /* unparsable: treated as external */ }
+        if (allowed.has(target)) return route.fallback();
+        // another host: only the files a page is built from, and only by reading them
+        if (STATIC.has(req.resourceType()) && req.method() === 'GET') return route.fallback();
+        this.events.markBlocked(req, 'external-host', `another host (${target || 'unknown'}) is not on the allowed list; only static files are loaded from other hosts`);
+        return route.abort('blockedbyclient');
       });
     }
     // Registered AFTER auth/external routes so it runs first (Playwright evaluates routes newest-first) and falls back to them.
     await this.context.route('**/*', (route) => {
       const req = route.request();
-      if (this.requestGuard && !this.requestGuard({ method: req.method(), url: req.url() })) {
-        this.blockedRequests.push({ method: req.method(), url: this.redactor.redactUrl(req.url()) });
+      const verdict = this.requestGuard ? this.requestGuard({ method: req.method(), url: req.url() }) : true;
+      if (verdict !== true) {
+        const reason = typeof verdict === 'string' ? verdict : 'safety guard: request not allowed';
+        this.blockedRequests.push({ method: req.method(), url: this.redactor.redactUrl(req.url()), at: Date.now(), phase: this.events.phase, reason });
+        this.events.markBlocked(req, 'safety-guard', reason);
         return route.abort('blockedbyclient');
       }
       return route.fallback();
     });
     if (this.opts.trace) { await this.context.tracing.start({ screenshots: true, snapshots: true }); this.tracing = true; }
     this._page = await this.context.newPage();
-    this.events.attach(this._page);
-    this._page.on('dialog', (d) => {
-      this.jsDialogs.push({ type: d.type(), message: this.redactor.redact(d.message()).slice(0, 200) });
-      void (d.type() === 'beforeunload' ? d.accept() : d.dismiss()).catch(() => undefined);
-    });
+    this.wire(this._page);
     this.context.on('page', (p) => {
-      if (p === this._page) return;
+      if (p === this._page || this.openingTab) return;
       this.popups.push({ url: this.redactor.redactUrl(p.url()) });
       void p.close().catch(() => undefined);
     });
+  }
+
+  private openingTab = false;
+  private wire(page: Page): void {
+    this.events.attach(page);
+    page.on('dialog', (d) => {
+      this.jsDialogs.push({ type: d.type(), message: this.redactor.redact(d.message()).slice(0, 200) });
+      void (d.type() === 'beforeunload' ? d.accept() : d.dismiss()).catch(() => undefined);
+    });
+  }
+
+  /** True when the tab no longer answers at all (a script is spinning, or it is blocked in a dialog or unload handler). */
+  private async tabIsHung(): Promise<boolean> {
+    const alive = await Promise.race([
+      this._page.evaluate('1').then(() => true, () => false),
+      new Promise<boolean>((r) => setTimeout(() => r(false), 2500)),
+    ]);
+    return !alive;
+  }
+
+  /**
+   * Replaces a hung tab with a fresh one in the SAME context, so cookies and storage (the logged-in session) are kept.
+   * The old tab is closed without waiting, because a hung tab may never confirm.
+   */
+  private async freshTab(): Promise<void> {
+    const old = this._page;
+    // Close the hung tab FIRST and give the browser a moment to tear it down: a new tab for the same site shares its
+    // process, and would be stuck behind it otherwise. The wait is bounded because a hung tab may never confirm.
+    await Promise.race([old.close().catch(() => undefined), new Promise((r) => setTimeout(r, 4000))]);
+    this.openingTab = true;
+    try {
+      const page = await this.context.newPage();
+      await page.setViewportSize({ width: this._viewport.width, height: this._viewport.height }).catch(() => undefined);
+      this.wire(page);
+      this._page = page;
+    } finally { this.openingTab = false; }
   }
 
   get page(): Page { return this._page; }
@@ -97,7 +147,7 @@ export class BrowserController {
   get url(): string { return this.redactor.redactUrl(this._page.url()); }
 
   /** Install (or clear with null) a predicate; requests for which it returns false are aborted before leaving the browser. */
-  setRequestGuard(fn: ((req: { method: string; url: string }) => boolean) | null): void { this.requestGuard = fn; }
+  setRequestGuard(fn: ((req: { method: string; url: string }) => boolean | string) | null): void { this.requestGuard = fn; }
 
   async setViewport(v: Viewport): Promise<void> {
     this._viewport = v;
@@ -139,6 +189,50 @@ export class BrowserController {
   }
 
   private partialLoad = false;
+  private navStartedAt = 0;
+  private navStartIndex = 0;
+  /**
+   * The DATA requests this page makes whenever it loads, learned from its first load: signature (method + endpoint) and how
+   * many milliseconds after the navigation each one started. Requests that turn out not to repeat are removed.
+   */
+  pageLoadProfile: Map<string, number> | null = null;
+
+  /** From now on, new requests are caused by what the tester does, not by the page loading. */
+  beginAction(): void { this.events.phase = 'action'; }
+
+  /**
+   * Waits until the page has finished LOADING ITS DATA, not just its document, so that a late page-load request is not
+   * mistaken for the result of the next click.
+   *  - `learn` (the FIRST load of a page): the pattern is unknown, so wait for a long quiet period; applications often fetch
+   *    their data a moment after the document.
+   *  - otherwise (every reload): wait only for the data requests the page is known to repeat, then a short quiet period.
+   *    A known request that has not come back by the time it was due is a one-time request (made once per session): it is
+   *    dropped from the pattern, so it is waited for at most once and never again.
+   * Always bounded by maxMs.
+   */
+  async waitForPageLoad(opts: { learn?: boolean; maxMs?: number } = {}): Promise<void> {
+    const deadline = Date.now() + (opts.maxMs ?? 6000);
+    const profile = opts.learn ? null : this.pageLoadProfile;
+    // by when the slowest known load request should have started again (generous, but bounded)
+    const dueBy = profile && profile.size > 0 ? this.navStartedAt + Math.max(...profile.values()) * 1.5 + 600 : 0;
+    let quietSince = Date.now();
+    while (Date.now() < deadline) {
+      const now = Date.now();
+      if (this.events.inflight() > 0) quietSince = now;
+      const quiet = now - quietSince;
+      if (opts.learn) {
+        if (quiet >= 1500) return;
+      } else if (!profile || profile.size === 0) {
+        if (quiet >= 150) return;
+      } else {
+        const seen = new Set(this.events.started.slice(this.navStartIndex).map((r) => r.signature));
+        const missing = [...profile.keys()].filter((sig) => !seen.has(sig));
+        if (missing.length === 0) { if (quiet >= 200) return; }
+        else if (now >= dueBy && quiet >= 200) { for (const sig of missing) profile.delete(sig); return; }
+      }
+      await this._page.waitForTimeout(40).catch(() => undefined);
+    }
+  }
 
   /**
    * Staged navigation, so one slow or hanging resource cannot make a reachable page "unreachable":
@@ -176,7 +270,26 @@ export class BrowserController {
 
   navigate(url: string): Promise<ActionResult> {
     const abs = new URL(url, this.opts.baseUrl).toString();
-    return this.act(() => { this.loadMark = this.events.console.length; return this.gotoUsable((waitUntil) => this._page.goto(abs, { waitUntil })); });
+    return this.act(async () => {
+      this.events.phase = 'page-load'; this.navStartedAt = Date.now(); this.navStartIndex = this.events.started.length;
+      this.loadMark = this.events.console.length;
+      // Going to a URL that differs from the current one only by its fragment (or not at all) does not load anything:
+      // the browser just changes the hash. To really open that view from scratch, leave the page first. Leaving through a
+      // blank page also works when the current page is hung or still loading, where reload or script evaluation would stall.
+      const strip = (x: string): string => x.replace(/#.*$/, '');
+      if (abs.includes('#') && strip(this._page.url()) === strip(abs)) {
+        await this._page.goto('about:blank', { waitUntil: 'commit', timeout: 5000 }).catch(() => undefined);
+      }
+      try {
+        return await this.gotoUsable((waitUntil) => this._page.goto(abs, { waitUntil }));
+      } catch (e) {
+        // A navigation that cannot even start is usually not the server: the tab itself is stuck. One hung page must not
+        // make every following page "unreachable", so open the URL in a fresh tab of the same session, once.
+        if (!/Timeout/i.test(e instanceof Error ? e.message : String(e)) || !(await this.tabIsHung())) throw e;
+        await this.freshTab();
+        return this.gotoUsable((waitUntil) => this._page.goto(abs, { waitUntil }));
+      }
+    });
   }
   /** `force` skips Playwright's actionability wait; only for an element already verified to be visible, enabled and on top. */
   click(t: ElementTarget, opts: { force?: boolean } = {}): Promise<ActionResult> { return this.act(() => this.locate(t).click(opts.force ? { force: true } : undefined)); }
@@ -246,6 +359,11 @@ export class BrowserController {
     return this.redactor.redactDeep(raw);
   }
   get lastNavigationStatus(): number | undefined { return this.lastStatus; }
+  /** Clickable-looking elements in the first rows of each table, with the evidence found and the decision taken (diagnostic record). */
+  async rowCandidates(): Promise<RowCandidate[]> {
+    const raw = await this._page.evaluate(`(${COLLECT_ROW_CANDIDATES_SCRIPT})()`).catch(() => []) as RowCandidate[];
+    return this.redactor.redactDeep(raw);
+  }
   allElements(): Promise<ElementInfo[]> { return this.collect('all'); }
   visibleElements(): Promise<ElementInfo[]> { return this.collect('visible'); }
   interactiveElements(): Promise<ElementInfo[]> { return this.collect('interactive'); }
