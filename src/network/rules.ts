@@ -59,9 +59,14 @@ export const slowRequestRule: Rule = {
 
 const RESOURCE_NOISE = /Failed to load resource/i; // already reported by network.failed-request
 
+/**
+ * A logged error or uncaught exception is a diagnostic signal, not a user-facing failure: nothing here shows that any UI
+ * behaviour broke. It is recorded for review (anomaly), never as a defect. Interaction tests report a defect when an
+ * error goes together with a UI result that actually failed.
+ */
 export const consoleErrorRule: Rule = {
   id: 'console.error', name: 'Console error', category: 'console', severity: 'minor', basis: 'deterministic',
-  description: 'The page logged console.error or threw an uncaught exception.',
+  description: 'The page logged console.error or threw an uncaught exception. Recorded for review: an error alone does not show the UI is broken.',
   async evaluate(ctx) {
     const seen = new Set<string>();
     const out: Finding[] = [];
@@ -69,7 +74,7 @@ export const consoleErrorRule: Rule = {
       if (c.level !== 'error' || RESOURCE_NOISE.test(c.text) || seen.has(c.text)) continue;
       seen.add(c.text);
       out.push(makeFinding(consoleErrorRule, ctx, {
-        classification: 'defect', severity: c.kind === 'pageerror' ? 'major' : 'minor', element: null,
+        classification: 'anomaly', severity: c.kind === 'pageerror' ? 'major' : 'minor', element: null,
         expected: 'No console errors or uncaught exceptions',
         actual: `${c.kind === 'pageerror' ? 'Uncaught exception' : 'console.error'}: ${c.text.slice(0, 300)}${c.location ? ` (${c.location})` : ''}`,
       }));

@@ -1,5 +1,6 @@
 import { normalizeUrl, sameOrigin } from '../discovery/crawler.js';
-import { coveredBy, resetPage } from './helpers.js';
+import { resetPage } from './helpers.js';
+import { notInteractable, prepareInteraction } from './interact.js';
 import type { FunctionalContext, FunctionalResult } from './types.js';
 
 const BASE = { kind: 'link' as const };
@@ -52,17 +53,9 @@ export async function testLinks(ctx: FunctionalContext): Promise<FunctionalResul
     const rawBox = (await loc.boundingBox().catch(() => null)) ?? null;
     const box = rawBox ? { ...rawBox, vpWidth: c.viewport.width, vpHeight: c.viewport.height } : null;
     ctx.onAction?.({ type: 'checking', target: label, ok: true, box });
-    try {
-      await loc.scrollIntoViewIfNeeded({ timeout: 2000 });
-      await loc.click({ trial: true, timeout: 3000 });
-    } catch (e) {
-      const msg = (e instanceof Error ? e.message : String(e)).split('\n')[0]!;
-      const covered = /intercepts pointer events/i.test(msg);
-      const cover = covered ? await coveredBy(ctx, l.selector) : null;
-      const hard = covered && !cover?.floating;
-      push({ ...BASE, check: 'clickable', status: hard ? 'fail' : 'anomaly', severity: hard ? 'major' : 'minor', basis: hard ? 'deterministic' : null, element: el, expected: `Link "${label}" can be clicked`, actual: c.redactor.redact(`Not clickable${cover ? `: <${cover.description}> covers it${cover.floating ? ' (floating/overlay UI, needs review)' : ''}` : `: ${msg.slice(0, 200)}`}`) });
-      continue;
-    }
+    // a browser error while reaching the link is a test-runner event: the link's real state decides what it means
+    const ready = await prepareInteraction(ctx, { css: l.selector }, l.selector);
+    if (!ready.ok) { push(notInteractable(BASE.kind, el, label, ready)); continue; }
 
     if (!ctx.budget.consume()) break;
     const n0 = c.events.network.length;
@@ -70,7 +63,7 @@ export async function testLinks(ctx: FunctionalContext): Promise<FunctionalResul
     let lastBuf: Buffer | undefined;
     let usedClick = l.target !== '_blank';
     if (usedClick) {
-      const r = await c.click({ css: l.selector });
+      const r = await c.click(ready.target, { force: ready.force });
       await c.page.waitForLoadState('load', { timeout: 5000 }).catch(() => undefined);
       await c.settle(150);
       lastBuf = await c.page.screenshot({ type: 'png' }).catch(() => undefined);

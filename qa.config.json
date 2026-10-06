@@ -8,7 +8,7 @@
     { "name": "tablet", "width": 768, "height": 1024 },
     { "name": "mobile", "width": 390, "height": 844 }
   ],
-  "rules": { "disabled": ["console.warning", "network.slow-request", "geometry.zero-size"], "severityOverrides": {}, "custom": [], "plugins": [] },
+  "rules": { "disabled": ["console.error", "console.warning", "network.failed-request", "network.slow-request", "geometry.zero-size"], "severityOverrides": {}, "custom": [], "plugins": [] },
   "ignoredEndpoints": [],
   "dangerousActions": {
     "keywords": ["delete", "remove account", "purchase", "buy now", "pay", "checkout", "confirm payment", "deactivate", "close account", "unsubscribe all", "destroy", "wipe", "reset all"],

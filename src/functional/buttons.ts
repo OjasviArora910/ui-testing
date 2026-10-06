@@ -1,6 +1,7 @@
-import { coveredBy, elementOf, resetPage, targetFor } from './helpers.js';
+import { elementOf, resetPage, targetFor } from './helpers.js';
 import { classifyElementIntent, toClassifiable } from './intent.js';
-import { capturePreActionSnapshot, observeAction, traceOf } from './observer.js';
+import { clickAndObserve, notInteractable, prepareInteraction } from './interact.js';
+import { capturePreActionSnapshot, traceOf } from './observer.js';
 import type { FunctionalContext, FunctionalResult } from './types.js';
 import { verifyInteraction } from './verifier.js';
 
@@ -65,8 +66,7 @@ export async function testButtons(ctx: FunctionalContext): Promise<FunctionalRes
     pristine = false;
 
     const target = targetFor(b, [...model.buttons, ...model.tabs, ...model.checkboxes]);
-    const loc = c.locate(target);
-    const rawBox = (await loc.boundingBox().catch(() => null)) ?? b.box ?? null;
+    const rawBox = (await c.locate({ css: b.selector }).boundingBox().catch(() => null)) ?? b.box ?? null;
     const box = rawBox ? { ...rawBox, vpWidth: c.viewport.width, vpHeight: c.viewport.height } : null;
 
     // 1. TARGETED Phase
@@ -90,42 +90,23 @@ export async function testButtons(ctx: FunctionalContext): Promise<FunctionalRes
       intent,
     });
 
-    try {
-      await loc.scrollIntoViewIfNeeded({ timeout: 2000 });
-      await loc.click({ trial: true, timeout: 3000 });
-    } catch (e) {
-      const msg = (e instanceof Error ? e.message : String(e)).split('\n')[0]!;
-      const covered = /intercepts pointer events/i.test(msg);
-      const cover = covered ? await coveredBy(ctx, b.selector) : null;
-      const hard = covered && !cover?.floating;
-      const actualDesc = c.redactor.redact(
-        covered
-          ? `${cover ? `<${cover.description}>` : 'Another element'} covers the button${cover?.floating ? ' (floating/overlay UI, needs review)' : ''}: ${msg.slice(0, 160)}`
-          : `Not clickable: ${msg.slice(0, 200)}`,
-      );
-
+    // A browser error here (timeout, interception, locator not resolving) is a test-runner event, not a result: the element's
+    // real state decides whether it can be tested, is really obstructed, or cannot be judged.
+    const ready = await prepareInteraction(ctx, target, b.selector);
+    if (!ready.ok) {
+      const result = notInteractable(BASE.kind, el, label, ready);
       ctx.onAction?.({
         phase: 'RESULT',
-        type: 'clickable',
+        type: result.check,
         target: label,
         ok: false,
-        verdict: hard ? 'FAIL' : 'NEEDS_REVIEW',
-        confidence: 'HIGH',
-        expected: `Button "${label}" can be clicked`,
-        actual: actualDesc,
+        verdict: result.status === 'fail' ? 'FAIL' : result.status === 'skipped' ? 'BLOCKED' : 'NEEDS_REVIEW',
+        confidence: result.confidence ?? 'MEDIUM',
+        expected: result.expected,
+        actual: result.actual,
         box,
       });
-
-      push({
-        ...BASE,
-        check: 'clickable',
-        status: hard ? 'fail' : 'anomaly',
-        severity: hard ? 'major' : 'minor',
-        basis: hard ? 'deterministic' : null,
-        element: el,
-        expected: `Button "${label}" can be clicked`,
-        actual: actualDesc,
-      });
+      push(result);
       continue;
     }
 
@@ -147,9 +128,13 @@ export async function testButtons(ctx: FunctionalContext): Promise<FunctionalRes
       buffer: pre.screenshot,
     });
 
-    const res = await c.click(target);
-
     // 5. OBSERVING Phase (adaptive observation window)
+    const { click: res, observation } = await clickAndObserve(ctx, ready, b.selector, pre, intent, {
+      minWaitMs: 150,
+      maxWaitMs: 1000,
+      captureScreenshot: needScreenshot,
+    });
+
     ctx.onAction?.({
       phase: 'OBSERVING',
       type: 'observe',
@@ -157,12 +142,6 @@ export async function testButtons(ctx: FunctionalContext): Promise<FunctionalRes
       ok: res.ok,
       box,
       intent,
-    });
-
-    const observation = await observeAction(ctx, pre, intent, {
-      minWaitMs: 150,
-      maxWaitMs: 1000,
-      captureScreenshot: needScreenshot,
     });
 
     // 6. VERIFYING Phase
@@ -220,14 +199,13 @@ export async function testButtons(ctx: FunctionalContext): Promise<FunctionalRes
         ...proof,
       });
     } else if (outcome.verdict === 'FAIL') {
-      // The verifier only returns FAIL on hard runtime evidence or when a HIGH-confidence expectation was not met.
-      // A console.error line alone is a warning-level signal.
-      const isMajor = outcome.check !== 'console-error';
+      // The verifier only returns FAIL when the expected UI result did not happen: a HIGH-confidence expectation was not
+      // met, a request failed, the element is obstructed, or nothing happened and the handler threw.
       push({
         ...BASE,
         check: outcome.check,
         status: 'fail',
-        severity: isMajor ? 'major' : 'minor',
+        severity: 'major',
         basis: 'deterministic',
         element: el,
         expected: outcome.expected,
@@ -262,6 +240,8 @@ export async function testButtons(ctx: FunctionalContext): Promise<FunctionalRes
         element: el,
         expected: outcome.expected,
         actual: outcome.actual,
+        // errors logged while the UI worked, and any recovery the click needed: diagnostics, not findings
+        ...(outcome.details?.diagnostics || res.notes?.length ? { details: { ...outcome.details, reason: outcome.reason, interaction: res.notes } } : {}),
         durationMs: outcome.evidence?.durationMs,
         confidence: outcome.confidence,
       });

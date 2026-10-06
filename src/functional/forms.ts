@@ -176,11 +176,14 @@ export async function testForms(ctx: FunctionalContext): Promise<FunctionalResul
     let o: SubmitObservation | null;
     try { o = await submitAndObserve(ctx, form); } finally { guard.setAllowWrites(false); }
     if (!o) break;
+    // The submission itself failing (error page, failed request) is a problem. An error in the console is supporting
+    // evidence: it counts only when the submission had no observable result at all and the page threw.
     const problems: string[] = [];
-    if (o.jsErrors.length) problems.push(`uncaught exception: ${o.jsErrors[0]!.slice(0, 150)}`);
     if (o.errorPage) problems.push(`result page returned HTTP ${o.errorPage}`);
     if (config.functional.submitValidForms && o.failedRequests.length) problems.push(`failed request: ${o.failedRequests[0]!.slice(0, 150)}`);
-    if (o.consoleErrors.length) problems.push(`console error: ${o.consoleErrors[0]!.slice(0, 150)}`);
+    const responded = o.attempted || o.domChanged || o.feedbackText.length > 0 || o.nativeBlocked || o.blockedByGuard.length > 0;
+    if (o.jsErrors.length && (problems.length > 0 || !responded)) problems.push(`uncaught exception: ${o.jsErrors[0]!.slice(0, 150)}`);
+    if (o.consoleErrors.length && problems.length > 0) problems.push(`console error: ${o.consoleErrors[0]!.slice(0, 150)}`);
     const check = login ? 'login-attempt' : 'valid-submission';
     const what = login ? `Login attempt on "${label}" with synthetic credentials` : `Valid submission of "${label}"`;
     if (problems.length) {

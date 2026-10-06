@@ -120,14 +120,21 @@ export const offScreenRule: Rule = {
 };
 
 // ---------------------------------------------------------------- horizontal overflow
+/** The elements that make the page wider than the viewport, widest first. Empty when the page does not overflow. */
+function pageOverflowCulprits(ctx: RuleContext): ElementInfo[] {
+  const { scrollWidth, clientWidth } = ctx.metrics;
+  if (scrollWidth <= clientWidth + 1) return [];
+  return candidates(ctx).filter((e) => right(e.box) > clientWidth + 1 && e.styles.position !== 'fixed')
+    .sort((a, b) => right(b.box) - right(a.box)).slice(0, 3);
+}
+
 export const horizontalOverflowRule: Rule = {
   id: 'geometry.horizontal-overflow', name: 'Horizontal page overflow', category: 'layout', severity: 'major', basis: 'deterministic',
   description: 'The page is wider than the viewport, forcing horizontal scrolling.',
   async evaluate(ctx) {
     const { scrollWidth, clientWidth } = ctx.metrics;
     if (scrollWidth <= clientWidth + 1) return [];
-    const culprits = candidates(ctx).filter((e) => right(e.box) > clientWidth + 1 && e.styles.position !== 'fixed')
-      .sort((a, b) => right(b.box) - right(a.box)).slice(0, 3);
+    const culprits = pageOverflowCulprits(ctx);
     const top = culprits[0];
     return [makeFinding(horizontalOverflowRule, ctx, {
       classification: 'defect', element: top ? elementRef(top) : null,
@@ -144,8 +151,11 @@ export const containerOverflowRule: Rule = {
   async evaluate(ctx) {
     const idx = new ElementIndex(ctx.elements);
     const out: Finding[] = [];
+    // an element that makes the whole page scroll sideways is already the subject of the horizontal-overflow finding
+    const pageWide = new Set(ctx.config.rules.disabled.includes(horizontalOverflowRule.id) ? [] : pageOverflowCulprits(ctx).map((e) => e.selector));
     for (const e of candidates(ctx)) {
       if (out.length >= MAX_PER_RULE) break;
+      if (pageWide.has(e.selector)) continue;
       if (['img', 'table', 'video', 'canvas', 'iframe'].includes(e.tag) || inline(e)) continue; // handled by responsive rules
       if (['absolute', 'fixed', 'sticky'].includes(e.styles.position)) continue;
       const p = idx.parent(e);

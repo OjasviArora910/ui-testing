@@ -62,7 +62,7 @@ function createMockObservation(overrides: Partial<PostActionObservation> = {}): 
 
 describe('Phase 3: Verification Decision Layer', () => {
   describe('Hard Failures', () => {
-    it('fails when Playwright click execution fails', () => {
+    it('fails when the click cannot be performed because the element is really obstructed', () => {
       const intent: InferredIntent = {
         kind: 'GENERAL_ACTION',
         confidence: 'HIGH',
@@ -73,7 +73,7 @@ describe('Phase 3: Verification Decision Layer', () => {
       const outcome = verifyInteraction({
         intent,
         observation: obs,
-        clickResult: { ok: false, error: 'Element is covered by another modal' },
+        clickResult: { ok: false, error: 'Element is covered by another modal', cause: 'obstructed' },
         elementLabel: 'Submit Order',
         selector: '#btn-submit',
       });
@@ -85,7 +85,7 @@ describe('Phase 3: Verification Decision Layer', () => {
       expect(outcome.rootCause).toContain('Element is covered');
     });
 
-    it('fails when uncaught JavaScript page error occurs', () => {
+    it('fails when an uncaught JavaScript error occurs and the expected result did not happen', () => {
       const intent: InferredIntent = {
         kind: 'SWITCH_TAB',
         confidence: 'HIGH',
@@ -383,6 +383,85 @@ describe('Phase 3: Verification Decision Layer', () => {
 
       expect(outcome.verdict).toBe('NEEDS_REVIEW');
       expect(outcome.actual).toContain('No immediate observable change detected');
+    });
+  });
+
+  describe('Console errors and browser-automation errors are secondary evidence', () => {
+    const intent = (kind: InferredIntent['kind'], confidence: InferredIntent['confidence']): InferredIntent => ({ kind, confidence, summary: '', expectedOutcome: { description: 'expected result' } });
+    const verify = (i: InferredIntent, o: PostActionObservation, clickResult: Parameters<typeof verifyInteraction>[0]['clickResult'] = { ok: true }) =>
+      verifyInteraction({ intent: i, observation: o, clickResult, elementLabel: 'Menu', selector: '#menu' });
+    const opened: Partial<PostActionObservation> = { menus: { opened: ['#menu-list'], closed: [] }, stateChanges: ['governed region: hidden 0px -> shown 80px'] };
+    const thrown = { errors: [], pageErrors: ["SyntaxError: Failed to execute 'querySelector' on 'Document': '#' is not a valid selector."] };
+    const logged = { errors: ['tracker not initialised'], pageErrors: [] };
+
+    it('UI worked + uncaught exception -> PASS, with the error kept as a diagnostic', () => {
+      const out = verify(intent('OPEN_MODAL', 'HIGH'), createMockObservation({ ...opened, console: thrown }));
+      expect(out).toMatchObject({ verdict: 'PASS', check: 'popup-open' });
+      expect(out.details?.diagnostics).toEqual([expect.stringMatching(/^uncaught: SyntaxError/)]);
+      expect(out.reason).toMatch(/recorded as a diagnostic/);
+    });
+
+    it('UI worked + console.error -> PASS for every kind of control', () => {
+      for (const kind of ['GENERAL_ACTION', 'TOGGLE_ACCORDION', 'SWITCH_TAB', 'PAGINATE', 'FILTER_OR_SORT', 'TOGGLE', 'NAVIGATE', 'SUBMIT_FORM'] as const) {
+        expect(verify(intent(kind, 'HIGH'), createMockObservation({ ...opened, console: logged })).verdict, kind).toBe('PASS');
+      }
+    });
+
+    it('UI failed + uncaught exception -> FAIL, and the exception is named as the cause', () => {
+      const out = verify(intent('OPEN_MODAL', 'HIGH'), createMockObservation({ console: thrown }));
+      expect(out).toMatchObject({ verdict: 'FAIL', check: 'javascript-error', confidence: 'HIGH' });
+      expect(out.actual).toMatch(/Nothing on the page changed.*uncaught exception.*not a valid selector/);
+    });
+
+    it('UI failed + console.error -> FAIL on the behavioural check; the log line is supporting evidence only', () => {
+      const out = verify(intent('OPEN_MODAL', 'HIGH'), createMockObservation({ console: logged }));
+      expect(out).toMatchObject({ verdict: 'FAIL', check: 'modal-open' });
+      expect(out.rootCause).toMatch(/console\.error during the action: tracker not initialised/);
+    });
+
+    it('UI result unclear + console.error -> NEEDS_REVIEW, never a FAIL', () => {
+      expect(verify(intent('GENERAL_ACTION', 'LOW'), createMockObservation({ console: logged }))).toMatchObject({ verdict: 'NEEDS_REVIEW', check: 'console-error' });
+      // something changed, just not what a guessed intent expected
+      const partial = createMockObservation({ stateChanges: ['visible text changed'], console: thrown });
+      expect(verify(intent('OPEN_MODAL', 'MEDIUM'), partial)).toMatchObject({ verdict: 'NEEDS_REVIEW', check: 'javascript-error' });
+    });
+
+    it('a console error is never a FAIL by itself', () => {
+      for (const kind of ['GENERAL_ACTION', 'FILTER_OR_SORT', 'SEARCH', 'PAGINATE'] as const) {
+        expect(verify(intent(kind, 'MEDIUM'), createMockObservation({ console: logged })).verdict, kind).not.toBe('FAIL');
+      }
+    });
+
+    const failedRequest = { requests: [{ method: 'GET', url: '/api/track', status: 404 }], hasWrites: false, hasErrors: true, errorDetails: ['GET /api/track returned HTTP 404'] };
+
+    it('UI worked + a request that failed -> PASS, with the request kept as a diagnostic', () => {
+      const out = verify(intent('TOGGLE_ACCORDION', 'HIGH'), createMockObservation({ ...opened, network: failedRequest }));
+      expect(out).toMatchObject({ verdict: 'PASS', check: 'accordion-toggle' });
+      expect(out.details?.diagnostics).toEqual(['request: GET /api/track returned HTTP 404']);
+    });
+
+    it('a request that failed + nothing on the page changed -> FAIL: the action did not do its job', () => {
+      const out = verify(intent('GENERAL_ACTION', 'LOW'), createMockObservation({ network: failedRequest }));
+      expect(out).toMatchObject({ verdict: 'FAIL', check: 'network-failure', confidence: 'HIGH' });
+      expect(out.actual).toMatch(/returned HTTP 404\. Nothing on the page changed/);
+    });
+
+    it('browser-automation error + expected UI result observed -> PASS', () => {
+      const out = verify(intent('TOGGLE_ACCORDION', 'HIGH'), createMockObservation(opened), { ok: false, error: 'locator.click: Timeout 8000ms exceeded.', cause: 'unknown' });
+      expect(out).toMatchObject({ verdict: 'PASS', check: 'accordion-toggle' });
+      expect(out.details?.diagnostics).toEqual(['interaction: locator.click: Timeout 8000ms exceeded.']);
+    });
+
+    it('browser-automation error + no result + cause not established -> NEEDS_REVIEW, whatever the error says', () => {
+      for (const error of ['locator.scrollIntoViewIfNeeded: Timeout 2000ms exceeded.', 'locator.click: Timeout 8000ms exceeded.', 'element intercepts pointer events', 'waiting for element to be visible']) {
+        for (const cause of ['unknown', 'overlay', 'unavailable', undefined] as const) {
+          expect(verify(intent('TOGGLE_ACCORDION', 'HIGH'), createMockObservation(), { ok: false, error, cause })).toMatchObject({ verdict: 'NEEDS_REVIEW', check: 'click-executable' });
+        }
+      }
+    });
+
+    it('browser-automation error + no result + element really obstructed -> FAIL', () => {
+      expect(verify(intent('GENERAL_ACTION', 'LOW'), createMockObservation(), { ok: false, error: 'locator.click: Timeout 8000ms exceeded.', cause: 'obstructed' })).toMatchObject({ verdict: 'FAIL', check: 'click-executable' });
     });
   });
 });
