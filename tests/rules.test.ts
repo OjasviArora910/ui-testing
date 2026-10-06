@@ -133,7 +133,7 @@ describe('built-in rules against the demo app', () => {
   });
 
   it('ignored endpoints do not produce network findings', async () => {
-    const cfg = loadConfig('x.json', { ignoredEndpoints: ['/api/fail'] });
+    const cfg = loadConfig('x.json', { ignoredEndpoints: ['/api/fail'], rules: { disabled: [] } }); // the network diagnostic is off by default
     const c2 = await launchForTest({ baseUrl: demo.url, ignoredEndpoints: cfg.ignoredEndpoints });
     await c2.navigate(`${demo.url}/errors`); await c2.settle(200);
     const reg = await buildRegistry(cfg);

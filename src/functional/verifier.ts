@@ -1,20 +1,23 @@
-import type { InferredIntent, PostActionObservation, VerificationOutcome, VerificationVerdict } from './types.js';
+import type { InferredIntent, InteractionResult, PostActionObservation, VerificationOutcome } from './types.js';
 
 export interface VerifyInput {
   intent: InferredIntent;
   observation: PostActionObservation;
-  clickResult: { ok: boolean; error?: string };
+  clickResult: InteractionResult;
   elementLabel: string;
   selector: string;
 }
 
 /** Failures proven by the runtime itself; they stand regardless of how sure we are about the element's intent. */
-const HARD_CHECKS = new Set(['click-executable', 'javascript-error', 'network-failure', 'console-error']);
+const HARD_CHECKS = new Set(['click-executable', 'javascript-error', 'network-failure']);
 
 /**
  * Verifies whether the observed application behavior matches the expected semantic intent.
- * Evaluates real post-interaction behavior (DOM transitions, modals, tabs, network requests, console errors)
- * while rigorously preventing false positives:
+ * The verdict comes from what the UI observably did. Incidental technical signals never decide it by themselves:
+ *  - a console error or uncaught exception is supporting evidence. The UI did what was expected => PASS, with the error kept
+ *    as a diagnostic. It contributes to a FAIL only when the expected result did not happen;
+ *  - a browser-automation error (timeout, interception, element not ready) is a test-runner event. The expected result was
+ *    observed anyway => PASS. It is a FAIL only when the element is really obstructed; an undetermined cause => NEEDS_REVIEW;
  *  - a request stopped by ActionGuard yields BLOCKED (the workflow is unverified, neither pass nor failure);
  *  - "the expected change did not happen" is a FAIL only when the intent itself is HIGH confidence. A guessed
  *    intent (label or selector wording) that is not met goes to NEEDS_REVIEW instead of being called a bug.
@@ -30,50 +33,69 @@ export function verifyInteraction(input: VerifyInput): VerificationOutcome {
   return outcome;
 }
 
-function decide(input: VerifyInput): VerificationOutcome {
-  const { intent, observation, clickResult, elementLabel, selector } = input;
-  const { expectedOutcome } = intent;
-  const durationMs = observation.durationMs;
+/** True when the action had any observable effect on the page (state, content, dialogs, navigation or network). */
+export function observedChange(observation: PostActionObservation): boolean {
+  return (observation.stateChanges ?? []).length > 0 || (observation.jsDialogs ?? []).length > 0 || (observation.popups ?? []).length > 0 || observation.urlChanged ||
+    observation.domMutations.addedNodesCount > 0 || observation.domMutations.removedNodesCount > 0 || observation.domMutations.textChanged ||
+    observation.domMutations.attributeChanges.length > 0 || observation.dialogs.opened.length > 0 || observation.dialogs.closed.length > 0 ||
+    observation.menus.opened.length > 0 || observation.menus.closed.length > 0 || observation.toasts.appeared.length > 0 || observation.network.requests.length > 0;
+}
 
-  const evidence = {
+/** True when the page itself visibly responded. A request being sent is not a response the user sees. */
+export function uiChanged(observation: PostActionObservation): boolean {
+  return observedChange({ ...observation, network: { ...observation.network, requests: [] } });
+}
+
+type Evidence = NonNullable<VerificationOutcome['evidence']>;
+
+function decide(input: VerifyInput): VerificationOutcome {
+  const { intent, observation, clickResult, elementLabel } = input;
+  const { expectedOutcome } = intent;
+
+  const evidence: Evidence = {
     beforeScreenshot: observation.pre.screenshot,
     afterScreenshot: observation.screenshot,
     domMutations: observation.domMutations.attributeChanges,
     networkCalls: observation.network.requests,
     consoleErrors: [...observation.console.pageErrors, ...observation.console.errors],
-    durationMs,
+    durationMs: observation.durationMs,
   };
 
-  // 1. HARD FAILURE: Click Execution Failed
+  // 1. The test runner reported an error while acting. That is not a verdict: the observed UI state is.
   if (!clickResult.ok) {
+    const err = clickResult.error ?? 'unknown error';
+    const seen = decideBehaviour(input, evidence);
+    if (seen.verdict === 'PASS' && observedChange(observation)) {
+      return {
+        ...seen,
+        reason: `${seen.reason}. The browser automation reported an error while acting (${err}), but the expected result was observed`,
+        details: { ...seen.details, diagnostics: [`interaction: ${err}`] },
+      };
+    }
+    if (clickResult.cause === 'obstructed') {
+      return {
+        verdict: 'FAIL',
+        confidence: 'HIGH',
+        check: 'click-executable',
+        expected: `"${elementLabel}" can be clicked`,
+        actual: `Click failed: ${err}`,
+        reason: `Another element sits on top of "${elementLabel}", so it cannot be clicked, and the expected result did not happen`,
+        rootCause: err,
+        evidence,
+      };
+    }
     return {
-      verdict: 'FAIL',
-      confidence: 'HIGH',
+      verdict: 'NEEDS_REVIEW',
+      confidence: 'MEDIUM',
       check: 'click-executable',
-      expected: `Button "${elementLabel}" can be clicked without browser execution errors`,
-      actual: `Click failed: ${clickResult.error ?? 'Unknown error'}`,
-      reason: `Playwright was unable to click the element: ${clickResult.error}`,
-      rootCause: clickResult.error,
+      expected: expectedOutcome.description,
+      actual: `The test runner could not perform the action on "${elementLabel}" (${err}) and the expected result was not observed`,
+      reason: `A browser-automation error is not evidence of a website defect, and the cause could not be established (${clickResult.cause ?? 'unknown'})`,
       evidence,
     };
   }
 
-  // 2. HARD FAILURE: Uncaught JavaScript Page Errors
-  if (observation.console.pageErrors.length > 0) {
-    const err = observation.console.pageErrors[0]!;
-    return {
-      verdict: 'FAIL',
-      confidence: 'HIGH',
-      check: 'javascript-error',
-      expected: `Clicking "${elementLabel}" executes without raising uncaught JavaScript exceptions`,
-      actual: `Uncaught exception: ${err.slice(0, 200)}`,
-      reason: `Clicking the element triggered an uncaught JavaScript runtime error on the page`,
-      rootCause: err,
-      evidence,
-    };
-  }
-
-  // 2.5 SAFETY: ActionGuard stopped a request this action tried to send. The UI responded, the workflow is unverified.
+  // 2. SAFETY: ActionGuard stopped a request this action tried to send. The UI responded, the workflow is unverified.
   const blocked = observation.network.blockedByGuard ?? [];
   if (blocked.length > 0) {
     return {
@@ -87,8 +109,9 @@ function decide(input: VerifyInput): VerificationOutcome {
     };
   }
 
-  // 3. HARD FAILURE: Network Errors (HTTP 4xx / 5xx or connection failures)
-  if (observation.network.hasErrors) {
+  // 3. A request the action sent failed AND the page showed nothing for it: the action did not do its job.
+  //    When the page did respond, the failed request is supporting evidence only (step 4).
+  if (observation.network.hasErrors && !uiChanged(observation)) {
     const isServerError = observation.network.requests.some(
       (n) => n.status !== null && n.status >= 500,
     );
@@ -97,30 +120,69 @@ function decide(input: VerifyInput): VerificationOutcome {
       verdict: 'FAIL',
       confidence: 'HIGH',
       check: 'network-failure',
-      expected: `Network requests triggered by "${elementLabel}" succeed (HTTP < 400)`,
-      actual: `Network failure: ${firstErr}`,
-      reason: `Interaction dispatched one or more network requests that failed (${firstErr})`,
+      expected: `Activating "${elementLabel}" has a visible result, and the requests it sends succeed (HTTP < 400)`,
+      actual: `Network failure: ${firstErr}. Nothing on the page changed in response`,
+      reason: `The request sent by the action failed (${firstErr}) and the page showed no result for it`,
       rootCause: isServerError ? 'HTTP 5xx Server Error' : 'HTTP 4xx Client Error',
       evidence,
     };
   }
 
-  // 4. CONSOLE ERROR LOGS (console.error calls)
-  if (observation.console.errors.length > 0) {
-    const firstConsoleErr = observation.console.errors[0]!;
+  // 4. What the UI did decides the verdict; errors and failed requests during the action are weighed against that result.
+  return withRuntimeErrors(decideBehaviour(input, evidence), input);
+}
+
+/**
+ * Console errors, uncaught exceptions and failed requests are secondary evidence:
+ *  UI did what was expected                       -> PASS, error kept as a diagnostic
+ *  nothing happened at all + uncaught exception   -> FAIL: the handler crashed instead of doing its job
+ *  expected result failed (+ any error)           -> FAIL on the behavioural check, error named as supporting evidence
+ *  UI result unclear + any error                  -> NEEDS_REVIEW
+ * Errors the page already logged on its own before the action are excluded by the observer and never reach this point.
+ */
+function withRuntimeErrors(seen: VerificationOutcome, input: VerifyInput): VerificationOutcome {
+  const { observation, elementLabel } = input;
+  const thrown = observation.console.pageErrors;
+  const logged = observation.console.errors;
+  const failed = observation.network.hasErrors ? observation.network.errorDetails : [];
+  if (thrown.length === 0 && logged.length === 0 && failed.length === 0) return seen;
+
+  const first = (thrown[0] ?? logged[0] ?? failed[0]!).slice(0, 200);
+  const what = thrown.length > 0 ? 'Uncaught exception' : logged.length > 0 ? 'console.error' : 'Failed request';
+  const details = { ...seen.details, diagnostics: [...thrown.map((e) => `uncaught: ${e}`), ...logged.map((e) => `console.error: ${e}`), ...failed.map((e) => `request: ${e}`)] };
+
+  if (seen.verdict === 'PASS') {
+    return { ...seen, details, reason: `${seen.reason}. An error was logged during the action (${what}: ${first}); it is recorded as a diagnostic because the UI did what was expected` };
+  }
+  if (thrown.length > 0 && !observedChange(observation)) {
     return {
       verdict: 'FAIL',
       confidence: 'HIGH',
-      check: 'console-error',
-      expected: `Clicking "${elementLabel}" does not emit console.error logs`,
-      actual: `console.error: ${firstConsoleErr.slice(0, 200)}`,
-      reason: `Action logged errors to the browser console`,
-      rootCause: firstConsoleErr,
-      evidence,
+      check: 'javascript-error',
+      expected: seen.expected,
+      actual: `Nothing on the page changed after activating "${elementLabel}", and the page raised an uncaught exception while handling it: ${first}`,
+      reason: `The action had no observable effect and its handler threw an uncaught JavaScript exception`,
+      rootCause: thrown[0],
+      details,
+      evidence: seen.evidence,
     };
   }
+  if (seen.verdict === 'FAIL') {
+    return { ...seen, details, rootCause: `${seen.rootCause ?? seen.reason}. ${what} during the action: ${first}` };
+  }
+  return {
+    ...seen, details,
+    check: thrown.length > 0 ? 'javascript-error' : logged.length > 0 ? 'console-error' : 'network-failure',
+    actual: `${seen.actual}. ${what} during the action: ${first}`,
+    reason: `${seen.reason}. An error was logged, but an error alone does not show that the interaction is broken`,
+  };
+}
 
-  // 5. INTENT-SPECIFIC BEHAVIORAL VERIFICATION
+/** Intent-specific verification of the observed UI result. Looks only at what the page did, never at console output. */
+function decideBehaviour(input: VerifyInput, evidence: Evidence): VerificationOutcome {
+  const { intent, observation, elementLabel } = input;
+  const { expectedOutcome } = intent;
+
   // A state change after an interaction is the normal, expected outcome. `stateChanges` covers what node counts miss:
   // the control's own state, the region it governs, layout, theme and form values.
   const stateChanges = observation.stateChanges ?? [];
@@ -128,10 +190,7 @@ function decide(input: VerifyInput): VerificationOutcome {
   const stateNote = stateChanges.slice(0, 2).join('; ');
   const jsDialogs = observation.jsDialogs ?? [];
   const popups = observation.popups ?? [];
-  const anyChange = stateChanged || jsDialogs.length > 0 || popups.length > 0 || observation.urlChanged ||
-    observation.domMutations.addedNodesCount > 0 || observation.domMutations.removedNodesCount > 0 || observation.domMutations.textChanged ||
-    observation.domMutations.attributeChanges.length > 0 || observation.dialogs.opened.length > 0 || observation.dialogs.closed.length > 0 ||
-    observation.menus.opened.length > 0 || observation.menus.closed.length > 0 || observation.toasts.appeared.length > 0 || observation.network.requests.length > 0;
+  const anyChange = observedChange(observation);
 
   // 5.0 A native dialog or a popup window is a complete, observable response whatever the control was guessed to be.
   if (jsDialogs.length > 0 || popups.length > 0) {

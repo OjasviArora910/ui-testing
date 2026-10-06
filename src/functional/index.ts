@@ -11,3 +11,4 @@ export { testForms } from './forms.js';
 export { testSearch } from './search.js';
 export { testModals } from './modal.js';
 export { testFields } from './fields.js';
+export * from './interact.js';

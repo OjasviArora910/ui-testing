@@ -6,7 +6,11 @@ import { testModals } from './modal.js';
 import { testSearch } from './search.js';
 import type { FunctionalContext, FunctionalResult } from './types.js';
 
-/** Checks whose ambiguous outcome is still a concrete suspected problem worth a person's look. */
+/**
+ * Checks whose ambiguous outcome is still a concrete, user-facing suspected problem worth a person's look: a link landing on
+ * an error-looking page, a control sitting under floating UI. An unclear result, with or without a logged error or a
+ * test-runner failure, is not one: it is recorded as tested and not reported.
+ */
 const REVIEWABLE = new Set(['soft-error-page', 'clickable', 'destination']);
 
 type Suite = [FunctionalResult['kind'], (c: FunctionalContext) => Promise<FunctionalResult[]>];

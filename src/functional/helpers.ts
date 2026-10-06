@@ -46,24 +46,3 @@ export function newLines(before: string[], after: string[]): string[] {
 }
 
 export const VALIDATION_TEXT = /(required|invalid|error|must|please|enter a|not valid|too short|too long|incorrect|cannot be empty|can't be blank)/i;
-
-export interface Coverer { description: string; floating: boolean }
-
-/**
- * Who is on top of the element's centre? `floating` = the coverer is fixed/sticky or a dialog/overlay, which is
- * legitimate layered UI (cookie banners, modals) and therefore needs a human, not an automatic defect.
- */
-export async function coveredBy(ctx: FunctionalContext, selector: string): Promise<Coverer | null> {
-  return ctx.controller.page.evaluate(`((sel) => {
-    const el = document.querySelector(sel); if (!el) return null;
-    const r = el.getBoundingClientRect(); if (r.width === 0 || r.height === 0) return null;
-    const top = document.elementFromPoint(Math.min(Math.max(r.x + r.width / 2, 0), innerWidth - 1), Math.min(Math.max(r.y + r.height / 2, 0), innerHeight - 1));
-    if (!top || top === el || el.contains(top) || top.contains(el)) return null;
-    let floating = false;
-    for (let n = top; n && n !== document.body; n = n.parentElement) {
-      const cs = getComputedStyle(n);
-      if (cs.position === 'fixed' || cs.position === 'sticky' || n.getAttribute('role') === 'dialog' || n.getAttribute('aria-modal') === 'true' || n.tagName === 'DIALOG') { floating = true; break; }
-    }
-    return { description: top.tagName.toLowerCase() + (top.id ? '#' + top.id : ''), floating };
-  })(${JSON.stringify(selector)})`) as Promise<Coverer | null>;
-}

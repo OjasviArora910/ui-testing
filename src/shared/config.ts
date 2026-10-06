@@ -37,13 +37,18 @@ export const ConfigSchema = z.object({
     { name: 'mobile', width: 390, height: 844 },
   ]),
   rules: z.object({
-    /** Off by default: diagnostics about the page's internals (console warnings, request timing, zero-size nodes), not UI/UX problems a user sees. */
-    disabled: z.array(z.string()).default(['console.warning', 'network.slow-request', 'geometry.zero-size']),
+    /**
+     * Off by default: diagnostics about the page's internals (console output, failed or slow requests, zero-size nodes), not
+     * UI/UX problems a user sees. They stay available as evidence (console and network logs). What a failed request or an
+     * error does to the UI is reported by the checks that look at the UI: a broken image, a link to an error page, an
+     * interaction that does not work.
+     */
+    disabled: z.array(z.string()).default(['console.error', 'console.warning', 'network.failed-request', 'network.slow-request', 'geometry.zero-size']),
     severityOverrides: z.record(z.string(), SeveritySchema).default({}),
     custom: z.array(CustomRuleSchema).default([]),
     /** Paths to JS/TS modules (relative to cwd) that default-export Rule | Rule[]. Lets teams add rules without touching core. */
     plugins: z.array(z.string()).default([]),
-  }).default({ disabled: ['console.warning', 'network.slow-request', 'geometry.zero-size'], severityOverrides: {}, custom: [], plugins: [] }),
+  }).default({ disabled: ['console.error', 'console.warning', 'network.failed-request', 'network.slow-request', 'geometry.zero-size'], severityOverrides: {}, custom: [], plugins: [] }),
   ignoredEndpoints: z.array(z.string()).default([]),
   dangerousActions: z.object({
     keywords: z.array(z.string()).default(['delete', 'remove account', 'purchase', 'buy now', 'pay', 'checkout', 'confirm payment', 'deactivate', 'close account', 'unsubscribe all', 'destroy', 'wipe', 'reset all']),

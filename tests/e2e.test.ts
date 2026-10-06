@@ -66,6 +66,9 @@ describe('end-to-end against the demo app', () => {
     for (const [page, rules] of Object.entries(GROUND_TRUTH)) {
       for (const rule of rules) expect(on(page).map((f) => f.ruleId), `${rule} on ${page}`).toContain(rule);
     }
+    // one problem, one finding: the covered button is the overlap finding, and the page-wide element is the horizontal overflow
+    expect(on('/overlap').filter((f) => /^\[clickable\]/.test(f.actual)).map((f) => f.actual)).toEqual([]);
+    expect(on('/overflow').filter((f) => f.ruleId === 'geometry.container-overflow').map((f) => f.element?.selector)).not.toContain('#wide');
     // false positives: no engine-confirmed defect on /legit
     expect(on('/legit').filter((f) => f.classification === 'defect').map((f) => `${f.ruleId}: ${f.actual}`)).toEqual([]);
     // safety: nothing destructive happened

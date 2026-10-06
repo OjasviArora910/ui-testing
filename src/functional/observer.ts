@@ -335,10 +335,14 @@ export async function observeAction(
     (n) => `${n.method} ${n.url} returned ${n.status ? `HTTP ${n.status}` : n.failure || 'network error'}`,
   );
 
-  const consoleErrors = conSlice
-    .filter((x) => x.level === 'error' && x.kind === 'console' && !/Failed to load resource/i.test(x.text))
-    .map((x) => x.text);
-  const pageErrors = conSlice.filter((x) => x.kind === 'pageerror').map((x) => x.text);
+  // An error the page had already logged by itself since it loaded (same text) keeps happening with or without this action,
+  // so it says nothing about the action. It is kept as a diagnostic, apart from the errors the action may have caused.
+  const before = new Set(c.events.console.slice(c.consoleIndexAtLoad, pre.consoleCount).filter((x) => x.level === 'error').map((x) => x.text));
+  const isError = (x: (typeof conSlice)[number]): boolean => x.kind === 'pageerror' || (x.level === 'error' && !/Failed to load resource/i.test(x.text));
+  const ambient = conSlice.filter((x) => isError(x) && before.has(x.text)).map((x) => x.text);
+  const caused = conSlice.filter((x) => isError(x) && !before.has(x.text));
+  const consoleErrors = caused.filter((x) => x.kind === 'console').map((x) => x.text);
+  const pageErrors = caused.filter((x) => x.kind === 'pageerror').map((x) => x.text);
 
   return {
     pre,
@@ -389,6 +393,7 @@ export async function observeAction(
     console: {
       errors: consoleErrors,
       pageErrors,
+      ambient,
     },
     targetPostState: rawPost.targetState,
     stateChanges, jsDialogs, popups,
@@ -401,7 +406,7 @@ export function traceOf(action: string, o: PostActionObservation): ActionTrace {
   return {
     action, urlBefore: o.pre.url, urlAfter: o.finalUrl,
     network: [...o.network.requests.map((n) => `${n.method} ${n.url} -> ${n.status ?? n.failure ?? 'pending'}`), ...(o.network.blockedByGuard ?? []).map((b) => `${b} -> blocked by ActionGuard`)],
-    console: [...o.console.pageErrors.map((e) => `uncaught: ${e}`), ...o.console.errors.map((e) => `console.error: ${e}`)],
+    console: [...o.console.pageErrors.map((e) => `uncaught: ${e}`), ...o.console.errors.map((e) => `console.error: ${e}`), ...(o.console.ambient ?? []).map((e) => `already logged before the action: ${e}`)],
     changes: [
       ...(o.urlChanged ? [`url: ${o.pre.url} -> ${o.finalUrl}`] : []),
       ...o.dialogs.opened.map((d) => `dialog opened: ${d}`), ...o.dialogs.closed.map((d) => `dialog closed: ${d}`),

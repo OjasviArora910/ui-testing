@@ -10,7 +10,7 @@ import type { RunRecord, RunState, RunStatus } from '../database/types.js';
 import { crawl } from '../discovery/crawler.js';
 import { buildPageModel } from '../discovery/pageModel.js';
 import type { PageModel } from '../discovery/types.js';
-import { classifyPage, classifyResult, controlKey, selectTests, type TestPlan } from '../dynamic/index.js';
+import { classifyPage, classifyResult, controlKey, sameRootCause, selectTests, type TestPlan } from '../dynamic/index.js';
 import { captureHighlightedElementScreenshot, capturePageEvidence, evidenceFor, type EvidenceRef, type EvidenceStore, type PageEvidence } from '../evidence/index.js';
 import {
   ActionBudget,
@@ -471,8 +471,13 @@ export class RunExecutor {
       const override = this.config.rules.severityOverrides[ruleId];
       const finding: Finding = override ? { ...base, severity: override } : base;
       const own = this.saveActionEvidence(r, url, vp.name);
-      const id = this.insertSimple({ ...finding, evidence: own.map((e) => e.id) });
-      if (id && own.length === 0) needCapture.push({ id, finding });
+      // the same user-facing problem already reported by a page check (an overlap that makes the control unclickable): one finding
+      const known = r.check === 'clickable' ? sameRootCause(finding, this.db.listFindings(this.runId)) : undefined;
+      if (known) this.db.addFindingEvidence(known.id, own.map((e) => e.id));
+      else {
+        const id = this.insertSimple({ ...finding, evidence: own.map((e) => e.id) });
+        if (id && own.length === 0) needCapture.push({ id, finding });
+      }
     }
     this.snap.currentAction = `${r.kind}: ${name ?? ''}`.slice(0, 120);
     this.snap.counts = runCounts(this.db, this.runId);

@@ -68,6 +68,20 @@ export function problemKey(f: Pick<Finding, 'ruleId' | 'category' | 'actual' | '
   return `${f.ruleId}|${pathOf(f.page)}|${f.element?.selector ?? ''}|${msg}`;
 }
 
+/**
+ * One user-facing problem is one finding. A control that cannot be clicked because another element covers it, and the
+ * overlap of those two elements, are the same problem seen by two checks: returns the stored overlap finding that already
+ * reports it, so the click result is attached to it as evidence instead of being listed again.
+ */
+export function sameRootCause<T extends Pick<Finding, 'ruleId' | 'classification' | 'page' | 'viewport' | 'element' | 'actual'>>(
+  f: Pick<Finding, 'ruleId' | 'page' | 'viewport' | 'element' | 'actual'>, existing: T[],
+): T | undefined {
+  if (!f.ruleId.startsWith('functional.') || !f.actual.startsWith('[clickable]') || !f.element) return undefined;
+  const sel = f.element.selector;
+  return existing.find((x) => x.ruleId === 'geometry.overlap' && x.classification === 'defect' && x.viewport === f.viewport && pathOf(x.page) === pathOf(f.page)
+    && (x.element?.selector === sel || x.actual.includes(`, ${sel})`)));
+}
+
 export interface ProblemGroup<T> { key: string; resultClass: FindingClass; representative: T; occurrences: T[] }
 const CLASS_RANK: Record<FindingClass, number> = { BUG: 0, WARNING: 1, NEEDS_REVIEW: 2, ACCESSIBILITY: 3, BLOCKED_BY_SAFETY: 4, EXPECTED: 5, INCONCLUSIVE: 6 };
 const SEVERITY_RANK = { critical: 0, major: 1, minor: 2, info: 3 } as const;

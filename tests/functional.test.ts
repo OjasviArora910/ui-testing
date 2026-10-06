@@ -85,11 +85,14 @@ describe('functional tests against the demo app', () => {
     expect(guard.blockedCount).toBeGreaterThanOrEqual(3);
   });
 
-  it('detects JS exceptions, console errors and failed requests triggered by buttons', async () => {
+  it('detects JS exceptions and failed requests triggered by buttons; a console.error line alone is not a finding', async () => {
     const r = await run('/errors');
     const checks = failed(r).map((x) => x.check);
-    expect(checks).toEqual(expect.arrayContaining(['console-error', 'javascript-error', 'network-failure']));
+    expect(checks).toEqual(expect.arrayContaining(['javascript-error', 'network-failure']));
+    expect(checks).not.toContain('console-error');
     expect(failed(r).every((x) => x.basis === 'deterministic')).toBe(true);
+    // the button does nothing visible and logs an error: unclear and no strong evidence, so it is recorded, not reported
+    expect(r.filter((x) => x.check === 'console-error').map((x) => [x.status, x.basis])).toEqual([['inconclusive', null]]);
   });
 
   it('detects broken links (404/500), placeholder links; passes working ones', async () => {

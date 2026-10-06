@@ -140,6 +140,8 @@ export interface PostActionObservation {
   console: {
     errors: string[];
     pageErrors: string[];
+    /** Errors the page had already logged on its own before the action (same text). They are not caused by the action. */
+    ambient?: string[];
   };
   targetPostState?: {
     ariaExpanded: string | null;
@@ -161,6 +163,24 @@ export interface PostActionObservation {
   jsDialogs?: string[];
   popups?: string[];
   screenshot?: Buffer;
+}
+
+/**
+ * Why the test runner could not perform an action, established by inspecting the element itself (never from the error text):
+ *  obstructed  - another in-flow element sits on top of it: a person could not click it either
+ *  overlay     - floating/overlay UI (banner, dialog) sits on top of it: legitimate layering, needs a human
+ *  unavailable - the element is gone, hidden or disabled: there is nothing to operate
+ *  unknown     - the element looks usable and the cause could not be determined
+ */
+export type InteractionCause = 'obstructed' | 'overlay' | 'unavailable' | 'unknown';
+
+/** Result of performing an action. A failure here is a test-runner event; whether the website is at fault is decided from `cause` and the observed UI. */
+export interface InteractionResult {
+  ok: boolean;
+  error?: string;
+  cause?: InteractionCause;
+  /** Recovery steps taken (fallback locator, retry). Diagnostic only. */
+  notes?: string[];
 }
 
 export interface VerificationOutcome {

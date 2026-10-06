@@ -5,6 +5,8 @@ import type { Finding } from '../shared/types.js';
 import { ElementIndex, area, bottom, isVisuallyHiddenPattern, overlapRatio, right } from './primitives.js';
 
 const MAX_PER_RULE = 10;
+/** Smaller than this in either dimension an image is an icon, spacer or placeholder, not a picture whose shape matters. */
+const MIN_PICTURE = 48;
 const sameOrigin = (src: string, page: string): boolean => { try { return new URL(src, page).origin === new URL(page).origin; } catch { return false; } };
 const isSvg = (src: string): boolean => /\.svg(\?|#|$)|^data:image\/svg/i.test(src);
 
@@ -30,7 +32,7 @@ export const brokenImageRule: Rule = {
 
 export const distortedImageRule: Rule = {
   id: 'image.distorted', name: 'Distorted image', category: 'layout', severity: 'minor', basis: 'deterministic',
-  description: 'An image is stretched: its rendered aspect ratio differs clearly from its natural ratio while object-fit is the default "fill".',
+  description: 'A loaded picture is visibly stretched or squashed: both of its dimensions are forced, object-fit is the default "fill", and its shape differs from the picture by 30% or more. A size that merely differs from the natural size, a placeholder, an icon or a decorative strip is not distortion.',
   async evaluate(ctx) {
     const out: Finding[] = [];
     const bySelector = new Map(ctx.elements.map((e) => [e.selector, e]));
@@ -38,14 +40,18 @@ export const distortedImageRule: Rule = {
       const el = bySelector.get(img.selector);
       const nw = Number(img.meta?.naturalWidth ?? 0); const nh = Number(img.meta?.naturalHeight ?? 0);
       if (!el || !el.visible || nw <= 0 || nh <= 0 || isSvg(String(img.meta?.src ?? ''))) continue;
-      if (el.box.width < 24 || el.box.height < 24 || (el.styles.objectFit && el.styles.objectFit !== 'fill')) continue;
+      if (img.meta?.complete !== true) continue; // still loading: what is rendered is not the picture yet
+      // A real picture, not a 1px placeholder, spacer, icon or gradient strip that is meant to be stretched.
+      if (nw < MIN_PICTURE || nh < MIN_PICTURE || el.box.width < MIN_PICTURE || el.box.height < MIN_PICTURE) continue;
+      if (el.styles.objectFit && el.styles.objectFit !== 'fill') continue;
       const natural = nw / nh; const rendered = el.box.width / el.box.height;
-      const off = Math.abs(rendered - natural) / natural;
-      if (off < 0.15) continue;
+      // how far the shape is from the picture's own, the same in both directions (stretched wide or squashed narrow)
+      const off = Math.max(rendered, natural) / Math.min(rendered, natural) - 1;
+      if (off < 0.3) continue;
       out.push(makeFinding(distortedImageRule, ctx, {
         classification: 'defect', element: elementRef(el),
         expected: 'Images keep their natural aspect ratio (or declare object-fit)',
-        actual: `Image is ${nw}x${nh} (ratio ${natural.toFixed(2)}) but rendered ${Math.round(el.box.width)}x${Math.round(el.box.height)} (ratio ${rendered.toFixed(2)}): stretched by ${Math.round(off * 100)}%`,
+        actual: `Image is ${nw}x${nh} (ratio ${natural.toFixed(2)}) but rendered ${Math.round(el.box.width)}x${Math.round(el.box.height)} (ratio ${rendered.toFixed(2)}): ${rendered > natural ? 'stretched wide' : 'squashed narrow'} by ${Math.round(off * 100)}%`,
       }));
       if (out.length >= MAX_PER_RULE) break;
     }

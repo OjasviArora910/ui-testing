@@ -170,11 +170,16 @@ export class BrowserController {
     return response;
   }
 
+  private loadMark = 0;
+  /** Index into events.console at which the current document started loading: what follows was logged by this page load. */
+  get consoleIndexAtLoad(): number { return this.loadMark; }
+
   navigate(url: string): Promise<ActionResult> {
     const abs = new URL(url, this.opts.baseUrl).toString();
-    return this.act(() => this.gotoUsable((waitUntil) => this._page.goto(abs, { waitUntil })));
+    return this.act(() => { this.loadMark = this.events.console.length; return this.gotoUsable((waitUntil) => this._page.goto(abs, { waitUntil })); });
   }
-  click(t: ElementTarget): Promise<ActionResult> { return this.act(() => this.locate(t).click()); }
+  /** `force` skips Playwright's actionability wait; only for an element already verified to be visible, enabled and on top. */
+  click(t: ElementTarget, opts: { force?: boolean } = {}): Promise<ActionResult> { return this.act(() => this.locate(t).click(opts.force ? { force: true } : undefined)); }
   fill(t: ElementTarget, value: string): Promise<ActionResult> { return this.act(() => this.locate(t).fill(value)); }
   select(t: ElementTarget, value: string | string[]): Promise<ActionResult> { return this.act(() => this.locate(t).selectOption(value)); }
   check(t: ElementTarget): Promise<ActionResult> { return this.act(() => this.locate(t).check()); }
@@ -193,7 +198,7 @@ export class BrowserController {
       })(${JSON.stringify({ to: opts.to, by: opts.by })})`);
     });
   }
-  reload(): Promise<ActionResult> { return this.act(() => this.gotoUsable((waitUntil) => this._page.reload({ waitUntil }))); }
+  reload(): Promise<ActionResult> { return this.act(() => { this.loadMark = this.events.console.length; return this.gotoUsable((waitUntil) => this._page.reload({ waitUntil })); }); }
   back(): Promise<ActionResult> { return this.act(() => this._page.goBack({ waitUntil: 'load' })); }
   forward(): Promise<ActionResult> { return this.act(() => this._page.goForward({ waitUntil: 'load' })); }
   /** Waits (at most maxMs) until no request has been in flight for 150ms. Used before snapshotting network activity. */

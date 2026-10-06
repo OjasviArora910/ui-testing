@@ -1,6 +1,7 @@
 import { elementOf, resetPage, targetFor } from './helpers.js';
 import { classifyElementIntent, toClassifiable } from './intent.js';
-import { capturePreActionSnapshot, observeAction, traceOf } from './observer.js';
+import { clickAndObserve, notInteractable, prepareInteraction } from './interact.js';
+import { capturePreActionSnapshot, traceOf } from './observer.js';
 import type { FunctionalContext, FunctionalResult } from './types.js';
 import { verifyInteraction } from './verifier.js';
 
@@ -56,10 +57,11 @@ export async function testModals(ctx: FunctionalContext): Promise<FunctionalResu
     ctx.onAction?.({ phase: 'TARGETED', type: 'target', target: label, ok: true, box, intent, expected: intent.expectedOutcome.description });
 
     // ---- open
+    const ready = await prepareInteraction(ctx, targetFor(b, model.buttons), b.selector);
+    if (!ready.ok) { push(notInteractable(BASE.kind, el, label, ready)); continue; }
     const before = await state();
     const pre = await capturePreActionSnapshot(c, b.selector, { captureScreenshot: true });
-    const click = await c.click(targetFor(b, model.buttons));
-    const observation = await observeAction(ctx, pre, intent, { minWaitMs: 200, maxWaitMs: 1200, captureScreenshot: true });
+    const { click, observation } = await clickAndObserve(ctx, ready, b.selector, pre, intent, { minWaitMs: 200, maxWaitMs: 1200, captureScreenshot: true });
     const outcome = verifyInteraction({ intent, observation, clickResult: click, elementLabel: label, selector: b.selector });
     ctx.onAction?.({
       phase: 'RESULT', type: outcome.check, target: label, ok: outcome.verdict === 'PASS', verdict: outcome.verdict, confidence: outcome.confidence,
@@ -68,7 +70,7 @@ export async function testModals(ctx: FunctionalContext): Promise<FunctionalResu
     const openProof = { before: pre.screenshot, screenshot: observation.screenshot, trace: traceOf(`click "${label}"`, observation) };
     const common = { ...BASE, element: el, expected: outcome.expected, actual: outcome.actual, confidence: outcome.confidence, durationMs: observation.durationMs };
     if (outcome.verdict === 'BLOCKED') { push({ ...common, check: outcome.check, status: 'blocked', severity: 'info', basis: null, ...openProof }); continue; }
-    if (outcome.verdict === 'FAIL') { push({ ...common, check: outcome.check, status: 'fail', severity: outcome.check === 'console-error' ? 'minor' : 'major', basis: 'deterministic', details: { reason: outcome.reason, rootCause: outcome.rootCause }, ...openProof }); continue; }
+    if (outcome.verdict === 'FAIL') { push({ ...common, check: outcome.check, status: 'fail', severity: 'major', basis: 'deterministic', details: { reason: outcome.reason, rootCause: outcome.rootCause }, ...openProof }); continue; }
     if (outcome.verdict === 'NEEDS_REVIEW') { push({ ...common, check: outcome.check, status: 'anomaly', severity: 'minor', basis: null, details: { reason: outcome.reason }, ...openProof }); continue; }
     push({ ...common, check: outcome.check, status: 'pass', severity: 'info', basis: null });
 

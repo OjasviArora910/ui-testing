@@ -5,7 +5,7 @@ import { runAxe } from '../src/accessibility/index.js';
 import type { BrowserController } from '../src/browser/index.js';
 import { QADatabase } from '../src/database/db.js';
 import { buildPageModel } from '../src/discovery/pageModel.js';
-import { classifyFinding, classifyPage, classifyResult, countFindings, groupProblems, problemKey, selectTests, trackOf } from '../src/dynamic/index.js';
+import { classifyFinding, classifyPage, classifyResult, countFindings, groupProblems, problemKey, sameRootCause, selectTests, trackOf } from '../src/dynamic/index.js';
 import { ActionBudget, ActionGuard, runFunctionalTests, type FunctionalResult } from '../src/functional/index.js';
 import { buildReportData, summarizeRun } from '../src/reporting/data.js';
 import { renderHtml } from '../src/reporting/html.js';
@@ -79,6 +79,17 @@ describe('one underlying problem is reported once', () => {
     expect(groups[0]).toMatchObject({ resultClass: 'BUG' });
     expect(groups[0]!.occurrences).toHaveLength(3);
     expect(countFindings([fail('export', 'http://app.test/a'), fail('refresh', 'http://app.test/a'), fail('reload', 'http://app.test/b')]).bugs).toBe(1);
+  });
+
+  it('a control that cannot be clicked because of an overlap already reported is that same problem, not a second finding', () => {
+    const overlap = full({ ruleId: 'geometry.overlap', category: 'layout', element: { selector: '#save' }, actual: '"Save" (180x40 at (10,120)) and "Discard" (180x40 at (90,128), #discard) are rendered on top of each other' });
+    const click = (selector: string, o: Partial<Finding> = {}) => full({ element: { selector }, actual: `[clickable] <button#discard> covers "Save", so a click cannot reach it`, ...o });
+    expect(sameRootCause(click('#save'), [overlap])).toBe(overlap);
+    expect(sameRootCause(click('#discard'), [overlap])).toBe(overlap); // either side of the overlapping pair
+    expect(sameRootCause(click('#other'), [overlap])).toBeUndefined();
+    expect(sameRootCause(click('#save', { page: 'http://app.test/b' }), [overlap])).toBeUndefined(); // another page
+    expect(sameRootCause(click('#save'), [{ ...overlap, classification: 'anomaly' as const }])).toBeUndefined(); // an unproven overlap does not absorb a proven failure
+    expect(sameRootCause(full({ element: { selector: '#save' }, actual: '[network-failure] Network failure: GET /x returned HTTP 500' }), [overlap])).toBeUndefined();
   });
 
   it('different failures stay separate', () => {
