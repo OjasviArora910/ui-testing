@@ -41,6 +41,8 @@ export function App() {
   }, [runs, selected]);
 
   const activeRunCount = runs.filter((r) => r.active).length;
+  const selectedRun = runs.find((r) => r.id === selected) ?? null;
+  const selectedRunActive = !!selectedRun?.active;
 
   return (
     <div className="app-shell">
@@ -138,7 +140,7 @@ export function App() {
       )}
 
       {/* Main SaaS Workspace Layout */}
-      <div className="app-workspace">
+      <div className={`app-workspace ${selectedRunActive ? 'workspace-executing' : ''}`}>
         <aside className="workspace-sidebar">
           {/* Sidebar Tab Toggle for Mobile/Tablet or quick switching */}
           <div className="sidebar-tab-switcher">
