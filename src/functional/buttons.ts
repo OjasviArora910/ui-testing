@@ -5,8 +5,14 @@ import { capturePreActionSnapshot, traceOf } from './observer.js';
 import { closeRevealed, exploreState, newExploration } from './explorer.js';
 import { closeOpenedDialog } from './modal.js';
 import { rememberControls, revealedContent } from './reversible.js';
+import { buildPageModel } from '../discovery/pageModel.js';
+import { collectRuleContext } from '../rules/context.js';
+import { buildRegistry } from '../rules/index.js';
 import type { FunctionalContext, FunctionalResult } from './types.js';
 import { verifyInteraction } from './verifier.js';
+
+import { inspectCurrentUI } from './audit.js';
+export { inspectCurrentUI };
 
 const BASE = { kind: 'button' as const };
 
@@ -20,10 +26,19 @@ export async function testButtons(ctx: FunctionalContext): Promise<FunctionalRes
     ? ctx.plan.buttons
     : model.buttons.filter((b) => !submitSelectors.has(b.selector)).slice(0, config.functional.maxButtonsPerPage).map((element) => ({ element, scenario: undefined }));
 
-  let pristine = false; // true while the page is exactly as loaded
-  for (const { element: b, scenario } of items) {
+  let needsReset = false;
+  for (const { element: planned, scenario } of items) {
     if (ctx.budget.exhausted) break;
     const push = (r: FunctionalResult): void => { const x = scenario ? { ...r, scenario } : r; results.push(x); ctx.onResult?.(x); };
+    // Re-read the rendered page before every target. A previous action may have replaced,
+    // hidden, or moved controls; the original page model is only a planning hint.
+    const current = await buildPageModel(c).catch(() => null);
+    const live = current?.interactive.find((x) => x.selector === planned.selector);
+    if (current && !live) {
+      push({ ...BASE, check: 'visibility', status: 'skipped', severity: 'info', basis: null, element: elementOf(planned), expected: 'Current-page controls are tested', actual: 'Control is no longer in the rendered DOM; not tested' });
+      continue;
+    }
+    const b = live ?? planned;
     const el = elementOf(b);
     const label = b.name || b.text || b.selector;
     const intent = classifyElementIntent(toClassifiable(b), model);
@@ -60,7 +75,7 @@ export async function testButtons(ctx: FunctionalContext): Promise<FunctionalRes
       continue;
     }
 
-    if (!b.visible) {
+    if (!b.visible || !b.enabled) {
       push({ ...BASE, check: 'visibility', status: 'skipped', severity: 'info', basis: null, element: el, expected: 'Visible', actual: 'Not visible; not tested' });
       continue;
     }
@@ -68,8 +83,10 @@ export async function testButtons(ctx: FunctionalContext): Promise<FunctionalRes
       push({ ...BASE, check: 'enabled-state', status: 'pass', severity: 'info', basis: null, element: el, expected: 'Disabled button is exposed as disabled', actual: 'Button is disabled' });
       continue;
     }
-    if (!pristine && !(await resetPage(ctx))) break;
-    pristine = false;
+    if (needsReset) {
+      if (!(await resetPage(ctx))) break;
+      needsReset = false;
+    }
 
     const target = targetFor(b, [...model.buttons, ...model.tabs, ...model.checkboxes]);
     const rawBox = (await c.locate({ css: b.selector }).boundingBox().catch(() => null)) ?? b.box ?? null;
@@ -99,6 +116,9 @@ export async function testButtons(ctx: FunctionalContext): Promise<FunctionalRes
     // A browser error here (timeout, interception, locator not resolving) is a test-runner event, not a result: the element's
     // real state decides whether it can be tested, is really obstructed, or cannot be judged.
     const ready = await prepareInteraction(ctx, target, b.selector);
+    const postScrollRawBox = (await c.locate({ css: b.selector }).boundingBox().catch(() => null)) ?? rawBox;
+    const activeBox = postScrollRawBox ? { ...postScrollRawBox, vpWidth: c.viewport.width, vpHeight: c.viewport.height } : box;
+
     if (!ready.ok) {
       const result = notInteractable(BASE.kind, el, label, ready);
       ctx.onAction?.({
@@ -110,7 +130,7 @@ export async function testButtons(ctx: FunctionalContext): Promise<FunctionalRes
         confidence: result.confidence ?? 'MEDIUM',
         expected: result.expected,
         actual: result.actual,
-        box,
+        box: activeBox,
       });
       push(result);
       continue;
@@ -130,10 +150,13 @@ export async function testButtons(ctx: FunctionalContext): Promise<FunctionalRes
       type: 'click',
       target: label,
       ok: true,
-      box,
+      box: activeBox,
       intent,
       buffer: pre.screenshot,
     });
+
+    // Brief settling pause allowing UI simulation to reflect the click state in real time
+    await new Promise((r) => setTimeout(r, 50));
 
     // 5. OBSERVING Phase (adaptive observation window)
     const { click: res, observation } = await clickAndObserve(ctx, ready, b.selector, pre, intent, {
@@ -147,8 +170,9 @@ export async function testButtons(ctx: FunctionalContext): Promise<FunctionalRes
       type: 'observe',
       target: label,
       ok: res.ok,
-      box,
+      box: activeBox,
       intent,
+      buffer: observation.screenshot,
     });
 
     // 6. VERIFYING Phase
@@ -157,7 +181,7 @@ export async function testButtons(ctx: FunctionalContext): Promise<FunctionalRes
       type: 'verify',
       target: label,
       ok: true,
-      box,
+      box: activeBox,
       intent,
       buffer: observation.screenshot,
     });
@@ -181,13 +205,10 @@ export async function testButtons(ctx: FunctionalContext): Promise<FunctionalRes
       expected: outcome.expected,
       actual: outcome.actual,
       detail: outcome.reason,
-      box,
+      box: activeBox,
       buffer: observation.screenshot,
       durationMs: outcome.evidence?.durationMs,
     });
-
-    // Nothing at all happened: the page is still as loaded and the next control can be tested without reloading.
-    pristine = outcome.verdict === 'NEEDS_REVIEW' && !observation.urlChanged && (observation.stateChanges ?? []).length === 0 && observation.dialogs.opened.length === 0 && observation.network.requests.length === 0;
 
     // Translate verification outcome into functional result
     const proof = { before: pre.screenshot, screenshot: observation.screenshot, trace: traceOf(`click "${label}"`, observation) };
@@ -270,6 +291,8 @@ export async function testButtons(ctx: FunctionalContext): Promise<FunctionalRes
         durationMs: outcome.evidence?.durationMs,
         confidence: outcome.confidence,
       });
+      // 7b. Run generic UI/UX inspection on the verified rendered state
+      await inspectCurrentUI(ctx, label, push);
     }
 
     // 8. What the click revealed (a dialog, a panel, an editor): its safe, reversible controls are tested in place and
@@ -280,12 +303,32 @@ export async function testButtons(ctx: FunctionalContext): Promise<FunctionalRes
       const run = newExploration();
       await exploreState(ctx, push, run, [label]).catch(() => false);
       if (run.visited.size > 0) {
-        pristine = false;
         ctx.onAction?.({ type: 'explored', target: label, ok: true, detail: `${run.visited.size} state(s): ${run.states.join(' | ').slice(0, 600)}` });
       }
       // a dialog that this click opened is then closed with its own close control, and the closing is verified
-      if ((shown?.dialog || observation.dialogs.opened.length > 0) && (await closeOpenedDialog(ctx, label, el, push).catch(() => false))) pristine = false;
-      else if (run.visited.size > 0) await closeRevealed(ctx).catch(() => false);
+      let closed = false;
+      if (shown?.dialog || observation.dialogs.opened.length > 0) {
+        closed = await closeOpenedDialog(ctx, label, el, push).catch(() => false);
+      } else if (run.visited.size > 0) {
+        closed = await closeRevealed(ctx).catch(() => false);
+      }
+      if (!closed && (shown?.dialog || run.visited.size > 0 || (shown && (shown.controls > 0 || shown.headings > 0)))) {
+        await c.press('Escape').catch(() => undefined);
+        await c.settle(150);
+        const stillShown = await revealedContent(c).catch(() => null);
+        if (stillShown && (stillShown.dialog || stillShown.controls > 0 || stillShown.headings > 0)) {
+          needsReset = true;
+        }
+      }
+    } else if (c.page.url() !== pre.rawUrl) {
+      const back = await c.page.goBack().catch(() => null);
+      await c.settle(200);
+      if (c.page.url() !== pre.rawUrl) {
+        needsReset = true;
+      }
+    }
+    if ((intent.kind === 'PAGINATE' || intent.kind === 'SWITCH_TAB') && outcome.verdict === 'PASS' && outcome.check !== 'already-active') {
+      needsReset = true;
     }
   }
   return results;

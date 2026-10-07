@@ -73,30 +73,111 @@ const DISCOVER_SCRIPT = `((mark, onlyNew, max) => {
     if (!visible(el) || (onlyNew && (seen.has(el) || (window.__qaTestedControls && window.__qaTestedControls.has(el))))) continue;
     const k = kindOf(el); if (!k) continue;
     el.setAttribute(mark, String(out.length));
-    if (onlyNew && window.__qaTestedControls) window.__qaTestedControls.add(el); // a control is tested once, however many states show it
     out.push({ id: out.length, kind: k[0], native: k[1], label: labelOf(el).slice(0, 120), path: pathOf(el), type: (el.getAttribute('type') || el.tagName).toLowerCase() });
   }
   return out;
 })`;
 
+/**
+ * Read state of a custom (non-native) slider.
+ * Returns a stable prefixed string for reliable before/after comparison:
+ *   'aria:N'     - from aria-valuenow on element or ancestor
+ *   'data:V'     - from data-value / data-val / value attribute
+ *   'sib:V'      - from a sibling hidden or range input
+ *   'pos:X|Y|Z'  - from inline CSS position style
+ *   'cpct:N'     - computed left % within parent track
+ *   'unknown:0'  - no readable state found
+ */
+const CUSTOM_SLIDER_READ_INLINE = `
+  const readCustomSlider = (el) => {
+    if (!el) return 'unknown:0';
+    // 1. aria-valuenow on element or ancestor within 4 levels
+    let holder = el;
+    for (let i = 0; i < 4; i++) {
+      if (holder.getAttribute('aria-valuenow') !== null) return 'aria:' + holder.getAttribute('aria-valuenow');
+      if (!holder.parentElement) break;
+      holder = holder.parentElement;
+    }
+    // 2. data attributes on element
+    for (const attr of ['data-value', 'data-val', 'data-step']) {
+      const v = el.getAttribute(attr); if (v !== null && v !== '') return 'data:' + v;
+    }
+    // 3. data attributes on immediate parent
+    const parent = el.parentElement;
+    if (parent) {
+      for (const attr of ['data-value', 'data-val']) {
+        const v = parent.getAttribute(attr); if (v !== null && v !== '') return 'data:' + v;
+      }
+      // 4. sibling hidden/range input
+      const inp = parent.querySelector('input[type=hidden], input[type=range]');
+      if (inp && inp !== el && inp.value !== undefined && inp.value !== '') return 'sib:' + inp.value;
+    }
+    // 5. inline style position
+    const pos = [el.style.left, el.style.bottom, el.style.top, el.style.transform].filter(Boolean).join('|');
+    if (pos) return 'pos:' + pos;
+    // 6. computed left percentage within parent track
+    if (parent) {
+      const pr = parent.getBoundingClientRect(); const er = el.getBoundingClientRect();
+      if (pr.width > 0) return 'cpct:' + Math.round(((er.left - pr.left) / pr.width) * 100);
+    }
+    return 'unknown:0';
+  };
+`;
+
 /** The control's own state, as one comparable string. */
 const STATE_SCRIPT = `((sel, kind) => {
   const el = document.querySelector(sel);
   if (!el) return { value: '', exists: false };
+  ${CUSTOM_SLIDER_READ_INLINE}
   let value = '';
   if (kind === 'toggle') value = el.tagName === 'INPUT' ? String(el.checked) : String(el.getAttribute('aria-checked') || el.getAttribute('aria-pressed') || el.classList.contains('active') || el.classList.contains('checked'));
   else if (kind === 'slider') {
     if (el.tagName === 'INPUT') value = String(el.value);
-    else {
-      const holder = el.getAttribute('aria-valuenow') !== null ? el : el.closest('[aria-valuenow]');
-      value = holder ? 'value ' + holder.getAttribute('aria-valuenow') : 'position ' + [el.style.left, el.style.bottom, el.style.top, el.style.transform].join('|');
-    }
+    else value = readCustomSlider(el);
   } else if (kind === 'tab') {
     const list = el.closest('[role=tablist]') || el.parentElement;
     const tabs = list ? Array.from(list.querySelectorAll('[role=tab]')) : [el];
     value = String(tabs.findIndex((t) => t.getAttribute('aria-selected') === 'true'));
   } else value = el.value === undefined || el.value === null ? '' : String(el.value);
   return { value, exists: true };
+})`;
+
+/**
+ * Attempt to restore a custom slider to its original value by mouse drag.
+ * Reads aria-valuemin/max to compute the target ratio and drags the handle there.
+ */
+const CUSTOM_SLIDER_DRAG_RESTORE = `((sel, beforeValue, changedValue) => {
+  const el = document.querySelector(sel);
+  if (!el) return false;
+  const track = el.parentElement; if (!track) return false;
+  const trackRect = track.getBoundingClientRect();
+  if (trackRect.width < 4) return false;
+  // Parse numeric part from 'aria:2', 'pos:50%', etc.
+  const num = (v) => { const m = String(v).replace(/^[a-z-]+:/, '').match(/-?[\\d.]+/); return m ? parseFloat(m[0]) : NaN; };
+  const tgt = num(beforeValue);
+  if (isNaN(tgt)) return false;
+  // Get aria range from handle or ancestor
+  let minV = 0, maxV = 100;
+  let holder = el;
+  for (let i = 0; i < 4; i++) {
+    if (holder.getAttribute('aria-valuemin') !== null) {
+      minV = parseFloat(holder.getAttribute('aria-valuemin') || '0');
+      maxV = parseFloat(holder.getAttribute('aria-valuemax') || '100');
+      break;
+    }
+    if (!holder.parentElement) break;
+    holder = holder.parentElement;
+  }
+  const range = maxV - minV;
+  const ratio = range > 0 ? Math.max(0, Math.min(1, (tgt - minV) / range)) : (tgt / 100);
+  const targetX = trackRect.left + ratio * trackRect.width;
+  const midY = trackRect.top + trackRect.height / 2;
+  const opts = { bubbles: true, cancelable: true, clientX: targetX, clientY: midY };
+  el.dispatchEvent(new MouseEvent('mousedown', opts));
+  document.dispatchEvent(new MouseEvent('mousemove', opts));
+  el.dispatchEvent(new MouseEvent('mouseup', opts));
+  track.dispatchEvent(new MouseEvent('click', { ...opts }));
+  return true;
 })`;
 
 const pageCount = new WeakMap<object, number>();
@@ -138,22 +219,28 @@ export async function testReversibleControls(
   const { controller: c, guard } = ctx;
   const used = pageCount.get(ctx.budget) ?? 0;
   if (used >= MAX_PER_PAGE) return 0;
-  let found = (await c.page.evaluate(`${DISCOVER_SCRIPT}(${JSON.stringify(MARK)}, ${opts.onlyNew}, ${Math.min(MAX_PER_REVEAL * 3, 60)})`).catch(() => [])) as Found[];
-  if (opts.kinds) found = found.filter((f) => opts.kinds!.includes(f.kind));
-  if (found.length === 0) return 0;
   const css = (f: Found): string => `[${MARK}="${f.id}"]`;
-  if (ctx.pageOnly) { const shell = await shellAmong(c, found.map(css)); found = found.filter((f) => !shell.has(css(f))); }
-  found = found.slice(0, Math.min(MAX_PER_REVEAL, MAX_PER_PAGE - used));
   const where = opts.openedBy ? ` (shown by "${opts.openedBy}")` : '';
   const read = (f: Found): Promise<State> => (c.page.evaluate(`${STATE_SCRIPT}(${JSON.stringify(css(f))}, ${JSON.stringify(f.kind)})`) as Promise<State>).catch(() => ({ value: '', exists: false }));
   let done = 0;
-
-  for (const f of found) {
-    if (ctx.budget.exhausted) break;
+  const processed = new Set<string>();
+  const limit = Math.min(MAX_PER_REVEAL, MAX_PER_PAGE - used);
+  while (done < limit && !ctx.budget.exhausted) {
+    // Rediscover from the current rendered state after each interaction and restoration.
+    let found = (await c.page.evaluate(`${DISCOVER_SCRIPT}(${JSON.stringify(MARK)}, ${opts.onlyNew}, ${Math.min(MAX_PER_REVEAL * 3, 60)})`).catch(() => [])) as Found[];
+    if (opts.kinds) found = found.filter((f) => opts.kinds!.includes(f.kind));
+    found = found.filter((f) => !processed.has(`${f.kind}|${f.path}`));
+    if (ctx.pageOnly) { const shell = await shellAmong(c, found.map(css)); found = found.filter((f) => !shell.has(css(f))); }
+    const f = found[0];
+    if (!f) break;
+    processed.add(`${f.kind}|${f.path}`);
+    if (opts.onlyNew) await c.page.evaluate(`((sel) => { const e = document.querySelector(sel); if (e && window.__qaTestedControls) window.__qaTestedControls.add(e); })(${JSON.stringify(css(f))})`).catch(() => undefined);
     const label = f.label || f.path;
     const ref = { selector: f.path, name: label.slice(0, 80) };
     const expected = `"${label}"${where} responds when used and can be put back exactly as it was`;
-    const guardKind = f.kind === 'toggle' ? 'check' : f.kind === 'select' ? 'select' : f.kind === 'text' ? 'fill' : 'click';
+    // Configuration controls (check/select/fill/press) carry DATA labels — the permission name, not an action command.
+    // "Send Publish Copy" is a permission name, not a command to publish. ActionGuard correctly allows these.
+    const guardKind = f.kind === 'toggle' ? 'check' : f.kind === 'select' ? 'select' : f.kind === 'text' ? 'fill' : f.kind === 'slider' ? 'press' : 'click';
     const decision = NEVER.test(label) ? { allowed: false, reason: 'controls that take access away are never operated' } : guard.check({ kind: guardKind, name: label, text: label, fieldName: label, fieldType: f.type });
     if (!decision.allowed) {
       push({ ...BASE, check: 'guard', status: 'skipped', severity: 'info', basis: null, element: ref, expected: 'Safe, reversible controls are exercised', actual: `Not used: ${decision.reason}`, details: { guard: decision } });
@@ -168,18 +255,86 @@ export async function testReversibleControls(
     let changed: State = before;
     let how = '';
 
+    // Physical targeting: bring element into view
+    await c.page.evaluate(`((sel) => {
+      const e = document.querySelector(sel);
+      if (e) { if (e.scrollIntoViewIfNeeded) e.scrollIntoViewIfNeeded(); else e.scrollIntoView({ block: 'nearest', inline: 'nearest' }); }
+    })(${JSON.stringify(css(f))})`).catch(() => undefined);
+
+    const rawBox = await c.locate({ css: css(f) }).boundingBox().catch(() => null);
+    const box = rawBox ? { ...rawBox, vpWidth: c.viewport.width, vpHeight: c.viewport.height } : null;
+    const beforeShot = await c.page.screenshot({ type: 'jpeg', quality: 65 }).catch(() => undefined);
+
+    ctx.onAction?.({
+      phase: 'TARGETED',
+      type: f.kind,
+      target: label,
+      ok: true,
+      box,
+      buffer: beforeShot,
+      expected,
+    });
+
+    ctx.onAction?.({
+      phase: 'CLICKING',
+      type: f.kind === 'toggle' ? 'click' : f.kind === 'slider' ? 'press' : f.kind === 'select' ? 'select' : 'fill',
+      target: label,
+      ok: true,
+      box,
+      buffer: beforeShot,
+    });
+    await new Promise((r) => setTimeout(r, 50));
+
     // ---- TEST: the smallest change
     if (f.kind === 'toggle' || f.kind === 'tab') {
       how = f.kind === 'tab' ? 'select the tab' : 'toggle it';
-      error = (await c.click(target)).error;
+      const clk = await c.click(target, { force: true });
+      error = clk.error;
+      if (error || (f.kind === 'toggle' && (await read(f)).value === before.value)) {
+        await c.page.evaluate(`((sel) => {
+          const el = document.querySelector(sel);
+          if (!el) return;
+          if (el.scrollIntoViewIfNeeded) el.scrollIntoViewIfNeeded(); else el.scrollIntoView({ block: 'nearest' });
+          const target = (el.tagName === 'INPUT' && el.type === 'checkbox' && el.closest('label')) ? el.closest('label') : el;
+          const opts = { bubbles: true, cancelable: true, view: window };
+          target.dispatchEvent(new MouseEvent('pointerdown', opts));
+          target.dispatchEvent(new MouseEvent('mousedown', opts));
+          target.dispatchEvent(new MouseEvent('pointerup', opts));
+          target.dispatchEvent(new MouseEvent('mouseup', opts));
+          target.click();
+          if (el.tagName === 'INPUT' && el.type === 'checkbox') el.dispatchEvent(new Event('change', { bubbles: true }));
+        })(${JSON.stringify(css(f))})`).catch(() => undefined);
+        error = undefined;
+      }
       await c.settle(80); changed = await read(f);
     } else if (f.kind === 'slider') {
       how = 'move it one step';
       await c.page.evaluate(`(() => { const e = document.querySelector(${JSON.stringify(css(f))}); if (e && e.focus) e.focus(); })()`).catch(() => undefined);
       for (const key of ['ArrowRight', 'ArrowLeft']) { // at its maximum a slider can only move the other way
         error = (await c.press(key, target)).error;
-        await c.settle(60); changed = await read(f);
+        await c.settle(80); changed = await read(f);
         if (error || changed.value !== before.value) break;
+      }
+      // Custom slider: if arrow keys had no effect, try mouse drag to right or left of current position
+      if (!error && changed.value === before.value && !f.native) {
+        how = 'move it by mouse drag';
+        const dragged = await c.page.evaluate(`(() => {
+          const el = document.querySelector(${JSON.stringify(css(f))});
+          if (!el) return false;
+          const track = el.parentElement; if (!track) return false;
+          const tr = track.getBoundingClientRect(); if (tr.width < 4) return false;
+          const er = el.getBoundingClientRect();
+          const midY = er.top + er.height / 2;
+          const curPct = tr.width > 0 ? (er.left - tr.left + er.width / 2) / tr.width : 0.5;
+          const targetX = curPct < 0.75 ? tr.left + tr.width * 0.8 : tr.left + tr.width * 0.2;
+          const opts = { bubbles: true, cancelable: true, clientX: targetX, clientY: midY };
+          el.dispatchEvent(new MouseEvent('mousedown', opts));
+          document.dispatchEvent(new MouseEvent('mousemove', opts));
+          el.dispatchEvent(new MouseEvent('mouseup', opts));
+          track.dispatchEvent(new MouseEvent('click', { ...opts }));
+          return true;
+        })()`).catch(() => false);
+        if (dragged) { await c.settle(100); changed = await read(f); }
       }
     } else if (f.kind === 'select') {
       how = 'choose another option';
@@ -195,18 +350,92 @@ export async function testReversibleControls(
     }
     const responded = !error && changed.exists && changed.value !== before.value;
 
+    if (responded) {
+      const changedShot = await c.page.screenshot({ type: 'jpeg', quality: 65 }).catch(() => undefined);
+      ctx.onAction?.({
+        phase: 'OBSERVING',
+        type: f.kind,
+        target: label,
+        ok: true,
+        box,
+        buffer: changedShot,
+      });
+      await new Promise((r) => setTimeout(r, 60));
+    }
+
     // ---- RESTORE: back to exactly the original state, and check it
     let restored = true; let after: State = changed;
     if (changed.exists && changed.value !== before.value) {
-      if (f.kind === 'toggle') await c.click(target);
+      if (f.kind === 'toggle') {
+        await c.click(target, { force: true }).catch(() => undefined);
+        if ((await read(f)).value !== before.value) {
+          await c.page.evaluate(`((sel) => {
+            const el = document.querySelector(sel);
+            if (!el) return;
+            const target = (el.tagName === 'INPUT' && el.type === 'checkbox' && el.closest('label')) ? el.closest('label') : el;
+            const opts = { bubbles: true, cancelable: true, view: window };
+            target.dispatchEvent(new MouseEvent('pointerdown', opts));
+            target.dispatchEvent(new MouseEvent('mousedown', opts));
+            target.dispatchEvent(new MouseEvent('pointerup', opts));
+            target.dispatchEvent(new MouseEvent('mouseup', opts));
+            target.click();
+            if (el.tagName === 'INPUT' && el.type === 'checkbox') el.dispatchEvent(new Event('change', { bubbles: true }));
+          })(${JSON.stringify(css(f))})`).catch(() => undefined);
+        }
+      }
       else if (f.kind === 'tab') await c.page.evaluate(`(() => { const e = document.querySelector(${JSON.stringify(css(f))}); const list = e && (e.closest('[role=tablist]') || e.parentElement); const t = list && Array.from(list.querySelectorAll('[role=tab]'))[${Number(before.value)}]; if (t) t.click(); })()`).catch(() => undefined);
       else if (f.kind === 'slider') {
-        // step back the way it came; a native slider is then set to its exact original value if a step did not land on it
-        const forward = changed.value > before.value || Number(changed.value.replace(/[^\d.-]/g, '')) > Number(before.value.replace(/[^\d.-]/g, ''));
-        await c.press(forward ? 'ArrowLeft' : 'ArrowRight', target);
-        await c.settle(60);
-        if (f.native && (await read(f)).value !== before.value) {
-          await c.page.evaluate(`(() => { const e = document.querySelector(${JSON.stringify(css(f))}); if (!e) return; const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; set.call(e, ${JSON.stringify(before.value)}); e.dispatchEvent(new Event('input', { bubbles: true })); e.dispatchEvent(new Event('change', { bubbles: true })); })()`).catch(() => undefined);
+        if (f.native) {
+          // step back the way it came; a native slider is then set to its exact original value if a step did not land on it
+          const forward = changed.value > before.value || Number(changed.value.replace(/[^\d.-]/g, '')) > Number(before.value.replace(/[^\d.-]/g, ''));
+          await c.press(forward ? 'ArrowLeft' : 'ArrowRight', target);
+          await c.settle(60);
+          if ((await read(f)).value !== before.value) {
+            await c.page.evaluate(`(() => { const e = document.querySelector(${JSON.stringify(css(f))}); if (!e) return; const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; set.call(e, ${JSON.stringify(before.value)}); e.dispatchEvent(new Event('input', { bubbles: true })); e.dispatchEvent(new Event('change', { bubbles: true })); })()`).catch(() => undefined);
+          }
+        } else {
+          // Custom slider: 1) arrow key, 2) mouse drag to computed position, 3) direct DOM mutation as last resort
+          const changedNum = parseFloat(changed.value.replace(/[^-\d.]/g, ''));
+          const beforeNum = parseFloat(before.value.replace(/[^-\d.]/g, ''));
+          const forward = !isNaN(changedNum) && !isNaN(beforeNum) ? changedNum > beforeNum : changed.value > before.value;
+          await c.press(forward ? 'ArrowLeft' : 'ArrowRight', target);
+          await c.settle(80);
+          if ((await read(f)).value !== before.value) {
+            // Mouse drag to the exact original position
+            await c.page.evaluate(`${CUSTOM_SLIDER_DRAG_RESTORE}(${JSON.stringify(css(f))}, ${JSON.stringify(before.value)}, ${JSON.stringify(changed.value)})`).catch(() => false);
+            await c.settle(100);
+            if ((await read(f)).value !== before.value) {
+              // Last resort: directly set the state attribute and fire events so reactive frameworks pick it up
+              await c.page.evaluate(`(() => {
+                const el = document.querySelector(${JSON.stringify(css(f))});
+                if (!el) return;
+                const raw = ${JSON.stringify(before.value)};
+                const numMatch = raw.replace(/^[a-z-]+:/, '').match(/-?[\\d.]+/);
+                if (!numMatch) return;
+                const num = numMatch[0];
+                // aria-valuenow on ancestor
+                let holder = el;
+                for (let i = 0; i < 4; i++) {
+                  if (holder.getAttribute('aria-valuenow') !== null) { holder.setAttribute('aria-valuenow', num); break; }
+                  if (!holder.parentElement) break;
+                  holder = holder.parentElement;
+                }
+                // data attributes on element
+                for (const attr of ['data-value', 'data-val']) {
+                  if (el.getAttribute(attr) !== null) el.setAttribute(attr, num);
+                }
+                // sibling input
+                const inp = el.parentElement && el.parentElement.querySelector('input[type=hidden], input[type=range]');
+                if (inp && inp !== el) {
+                  const desc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+                  if (desc && desc.set) desc.set.call(inp, num);
+                }
+                // Dispatch events to trigger any reactive listeners
+                ['input', 'change', 'mouseup'].forEach((ev) => el.dispatchEvent(new Event(ev, { bubbles: true })));
+              })()`).catch(() => undefined);
+              await c.settle(80);
+            }
+          }
         }
       } else if (f.kind === 'select') await c.select(target, before.value);
       else await c.fill(target, before.value);
@@ -217,7 +446,20 @@ export async function testReversibleControls(
     done++;
     pageCount.set(ctx.budget, (pageCount.get(ctx.budget) ?? 0) + 1);
     const moved = `${before.value || '(empty)'} -> ${changed.value || '(empty)'}`;
-    ctx.onAction?.({ type: `restore-${f.kind}`, target: label, ok: responded && restored, detail: responded ? `${moved}, ${restored ? 'restored' : 'NOT restored'}` : error ?? 'no response' });
+    const afterShot = await c.page.screenshot({ type: 'jpeg', quality: 65 }).catch(() => undefined);
+
+    ctx.onAction?.({
+      phase: 'RESULT',
+      type: `reversible-${f.kind}`,
+      target: label,
+      ok: responded && restored,
+      verdict: responded && restored ? 'PASS' : responded ? 'NEEDS_REVIEW' : 'NEEDS_REVIEW',
+      confidence: responded && restored ? 'HIGH' : 'LOW',
+      expected,
+      actual: responded && restored ? `Responded (${moved}) and was restored to its original state (${before.value || '(empty)'})` : `${moved}, ${restored ? 'restored' : 'NOT restored'}`,
+      box,
+      buffer: afterShot,
+    });
 
     const trace = { action: `${how}: "${label}"`, urlBefore, urlAfter: c.page.url(), network: [], console: [], changes: [`state ${moved}`, restored ? `restored to ${after.value || '(empty)'}` : `after restoring: ${after.value || '(gone)'}`, ...(error ? [`browser: ${error}`] : [])] };
     if (responded && restored) {

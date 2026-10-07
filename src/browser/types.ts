@@ -9,7 +9,7 @@ export interface ElementInfo {
   ownText: string;
   className: string;
   /** Relevant semantic attributes. */
-  aria: { modal: boolean; hidden: boolean; haspopup: boolean; expanded: string | null; disabled: boolean; invalid: boolean; live: string | null };
+  aria: { modal: boolean; hidden: boolean; haspopup: boolean | string; expanded: string | null; disabled: boolean; invalid: boolean; live: string | null };
   tag: string;
   type?: string;
   role: string | null;

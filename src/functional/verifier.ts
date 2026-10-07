@@ -537,6 +537,7 @@ function decideBehaviour(input: VerifyInput, evidence: Evidence): VerificationOu
       observation.domMutations.addedNodesCount > 0 ||
       observation.domMutations.removedNodesCount > 0 ||
       observation.domMutations.textChanged ||
+      observation.domMutations.attributeChanges.length > 0 ||
       stateChanged ||
       observation.urlChanged;
 

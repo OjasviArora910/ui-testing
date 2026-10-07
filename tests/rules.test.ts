@@ -174,4 +174,69 @@ describe('built-in rules against the demo app', () => {
     expect(f.map((x) => x.ruleId).sort()).toEqual(['cfg.needs-cta', 'cfg.no-lorem']);
     expect(f.every((x) => x.basis === 'configured_rule' && x.classification === 'defect')).toBe(true);
   });
+
+  it('produces confirmed UI findings against a deliberately malformed rendered layout', async () => {
+    let badSite: import('node:http').Server;
+    let badUrl: string;
+    const http = await import('node:http');
+
+    badSite = http.createServer((req, res) => {
+      res.setHeader('content-type', 'text/html');
+      res.end(`<!doctype html><html lang="en"><head><title>Malformed Layout</title>
+<style>
+body { font-family: sans-serif; margin: 20px; }
+.clipped-container { width: 90px; height: 25px; overflow: hidden; white-space: nowrap; border: 1px solid red; }
+.distorted-box { width: 220px; height: 50px; }
+.overlap-a { position: absolute; top: 100px; left: 20px; width: 180px; height: 40px; background: rgba(255,0,0,0.8); }
+.overlap-b { position: absolute; top: 110px; left: 30px; width: 180px; height: 40px; background: rgba(0,0,255,0.8); }
+.overflow-parent { width: 120px; height: 60px; overflow: visible; border: 1px solid #ccc; }
+.overflow-child { width: 240px; height: 40px; background: #eee; }
+</style></head><body>
+<h1>Malformed Layout Test</h1>
+<div class="clipped-container" id="bad-clip">Super long clipped line of text with no text-overflow ellipsis</div>
+<img class="distorted-box" id="bad-img" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAGQAAABkCAYAAABw4pVUAAAAPklEQVR42u3BAQ0AAADCoPdPbQ43oAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwG5nQAAGY0s10AAAAAElFTkSuQmCC" alt="Distorted" />
+<div class="overlap-a" id="box-a">Overlapping Box A</div>
+<div class="overlap-b" id="box-b">Overlapping Box B</div>
+<div class="overflow-parent" id="parent-box"><div class="overflow-child" id="overflow-child">Excessively wide non-scrolling text content that sticks out 120px</div></div>
+</body></html>`);
+    });
+
+    await new Promise<void>((r) => badSite.listen(0, '127.0.0.1', r));
+    badUrl = `http://127.0.0.1:${(badSite.address() as import('node:net').AddressInfo).port}`;
+
+    const testC = await launchForTest({ baseUrl: badUrl, blockExternal: true });
+    try {
+      await testC.navigate(badUrl);
+      await testC.settle(150);
+      const registry = await buildRegistry(config);
+      const ctx = await collectRuleContext(testC, { config });
+      const res = await registry.run(ctx);
+
+      const { notConfirmedReason } = await import('../src/dynamic/resultClassifier.js');
+      const confirmed = res.findings.filter((f) => f.classification === 'defect' && notConfirmedReason({ ...f, evidence: undefined }) === null);
+
+      // 1. Text clipping defect is confirmed
+      const clipFinding = confirmed.find((f) => f.ruleId === 'geometry.text-clipping');
+      expect(clipFinding).toBeDefined();
+      expect(clipFinding?.element?.selector).toContain('bad-clip');
+
+      // 2. Distorted image defect is confirmed
+      const imgFinding = confirmed.find((f) => f.ruleId === 'image.distorted');
+      expect(imgFinding).toBeDefined();
+      expect(imgFinding?.element?.selector).toContain('bad-img');
+
+      // 3. Overlap defect is confirmed
+      const overlapFinding = confirmed.find((f) => f.ruleId === 'geometry.overlap');
+      expect(overlapFinding).toBeDefined();
+
+      // 4. Genuine container overflow defect is confirmed
+      const overflowFinding = confirmed.find((f) => f.ruleId === 'geometry.container-overflow');
+      expect(overflowFinding).toBeDefined();
+      expect(overflowFinding?.element?.selector).toContain('overflow-child');
+    } finally {
+      await testC.close();
+      badSite.closeAllConnections?.();
+      await new Promise((r) => badSite.close(() => r(undefined)));
+    }
+  });
 });

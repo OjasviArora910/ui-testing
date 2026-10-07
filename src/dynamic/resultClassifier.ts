@@ -39,7 +39,7 @@ export const trackOf = (f: Pick<Finding, 'category' | 'ruleId'>): FindingTrack =
  * Checks that only MEASURE the page (box sizes and positions). A measurement that is off by some pixels is an observation:
  * it does not show that a user sees anything wrong, so on its own it can never be a confirmed bug.
  */
-const MEASUREMENT_ONLY = new Set(['geometry.container-overflow', 'geometry.zero-size', 'geometry.off-screen', 'geometry.small-target', 'consistency.spacing', 'consistency.alignment', 'layout.stacked-duplicate']);
+const MEASUREMENT_ONLY = new Set(['geometry.zero-size', 'geometry.off-screen', 'geometry.small-target', 'consistency.spacing', 'consistency.alignment', 'layout.stacked-duplicate']);
 
 export interface GateInput {
   classification: Finding['classification']; severity: Finding['severity']; category: string; ruleId: string;

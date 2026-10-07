@@ -25,11 +25,17 @@ const pathOf = (u: string): string => {
  */
 export function ReadinessPanel({ pages }: { pages: { url: string; title: string | null; readiness: PageReadiness }[] }) {
   const [open, setOpen] = useState<Record<string, boolean>>({});
-  if (pages.length === 0) return null;
+  const meaningfulPages = pages.filter(({ readiness: r }) => {
+    const hasApi = r.requests.some((q) => q.type !== 'document');
+    const hasBlockedOrFailed = r.staticFiles.blocked > 0 || r.staticFiles.failed > 0;
+    const isSpecialState = r.state === 'partial' || r.state === 'data-not-loaded' || r.state === 'empty';
+    return hasApi || hasBlockedOrFailed || isSpecialState;
+  });
+  if (meaningfulPages.length === 0) return null;
 
   return (
     <section>
-      {pages.map(({ url, readiness: r }) => {
+      {meaningfulPages.map(({ url, readiness: r }) => {
         const isOpen = open[url] ?? r.state === 'data-not-loaded';
         const api = r.requests.filter((q) => q.type !== 'document');
         return (

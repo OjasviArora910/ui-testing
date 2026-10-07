@@ -74,7 +74,7 @@ export const COLLECT_ELEMENTS_SCRIPT = `(mode) => {
       className: typeof el.className === 'string' ? el.className.slice(0, 120) : '',
       aria: {
         modal: el.getAttribute('aria-modal') === 'true', hidden: !!el.closest('[aria-hidden="true"]'),
-        haspopup: !!el.getAttribute('aria-haspopup') && el.getAttribute('aria-haspopup') !== 'false',
+        haspopup: el.getAttribute('aria-haspopup') && el.getAttribute('aria-haspopup') !== 'false' ? (el.getAttribute('aria-haspopup') === 'true' ? true : el.getAttribute('aria-haspopup')) : false,
         expanded: el.getAttribute('aria-expanded'), disabled: el.getAttribute('aria-disabled') === 'true',
         invalid: el.getAttribute('aria-invalid') === 'true', live: el.getAttribute('aria-live'),
       },

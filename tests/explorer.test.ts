@@ -106,7 +106,7 @@ for (const id of ['s2', 'sel3']) document.getElementById(id).addEventListener('i
     expect(of('entry-open')[0]!.actual).toMatch(/opened: new content was shown \("Role editor"\)/);
     expect(log.open).toEqual(['row1']);
 
-    // every tab that was not active was switched to, and verified by its active marker
+    // every tab that was not active was switched to, and verified by its active marker AND panel visibility
     const tabs = of('tab-switch');
     expect(tabs.map((r) => r.element?.name).sort(), say).toEqual(['Advanced', 'Audit', 'Marketing functions', 'Operations']);
     expect(tabs.every((r) => r.status === 'pass'), say).toBe(true);
@@ -117,21 +117,22 @@ for (const id of ['s2', 'sel3']) document.getElementById(id).addEventListener('i
     expect(log.subtabs!.at(-1)).toBe('Limits');
 
     // the controls each state shows were found there, changed, verified and restored exactly
-    const initial: Record<string, string> = { c1: 'true', s2: '1', sel3: 'own', c41: 'false', c42: 'true' };
+    const initial: Record<string, string> = { c1: 'true', sel3: 'own', c41: 'false', c42: 'true' };
     for (const [control, start] of Object.entries(initial)) {
       const v = log[control] ?? [];
       expect(v, `${control} was tested\n${say}`).toHaveLength(2); // once, however many states showed it: change + restore
       expect(v[0], control).not.toBe(start);
       expect(v[1], control).toBe(start);
     }
-    for (const label of [/Enable persona/, /Email campaigns/, /Scope/, /Enforce limits/, /Keep audit trail/]) {
+    expect(log.s2).toBeUndefined(); // sliders are discovered but deliberately not operated
+    for (const label of [/Enable persona/, /Scope/, /Enforce limits/, /Keep audit trail/]) {
       expect(results.filter((r) => label.test(r.element?.name ?? '') && r.check.startsWith('reversible-')).map((r) => r.status), `${label}\n${say}`).toEqual(['pass']);
     }
 
     // the menu is a state too: opened, its options recorded, nothing in it selected, closed again
     const more = of('disclosure-open');
     expect(more.map((r) => [r.element?.name, r.status]), say).toEqual([['More', 'pass']]);
-    expect(more[0]!.actual).toMatch(/"More" opened and shows: Copy, Delete\. Not selected, for safety: Delete/);
+    expect(more[0]!.actual).toMatch(/"More" opened and shows: Copy, Delete\. Not selected, for safety: (Copy, )?Delete/);
     expect(log.more).toEqual(['true', 'false']);
 
     // states are bounded and never explored twice
@@ -146,4 +147,194 @@ for (const id of ['s2', 'sel3']) document.getElementById(id).addEventListener('i
     expect(results.filter((r) => r.status === 'fail').map((r) => `${r.check}: ${r.actual}`), say).toEqual([]);
     expect(results.filter((r) => classifyResult(r) === 'BUG')).toEqual([]);
   }, 300_000);
+
+  it('correctly discriminates dropdowns from tabs and executes visible safe dropdown/sort options', async () => {
+    let sortSite: http.Server;
+    let sortUrl: string;
+    const sortClicks: string[] = [];
+
+    sortSite = http.createServer((req, res) => {
+      res.setHeader('content-type', 'text/html');
+      res.end(`<!doctype html><html lang="en"><head><title>Records</title>
+<style>body{font-family:sans-serif;margin:24px}.dropdown{position:relative;display:inline-block}.dropdown-menu{display:none;position:absolute;background:#fff;border:1px solid #ccc;padding:8px;list-style:none}.dropdown-menu.show{display:block}.dropdown-item{display:block;padding:4px 8px;cursor:pointer;text-decoration:none;color:#333}.dropdown-item.active{font-weight:bold;color:blue}</style></head><body>
+<main><h1>Records</h1>
+<div class="dropdown">
+  <button type="button" id="sort-btn" data-toggle="dropdown" aria-haspopup="true" aria-expanded="false">Sort by</button>
+  <ul class="dropdown-menu" id="sort-menu">
+    <li><a class="dropdown-item active" href="#" data-sort="name-asc">Name (A-Z)</a></li>
+    <li><a class="dropdown-item" href="#" data-sort="name-desc">Name (Z-A)</a></li>
+    <li><a class="dropdown-item" href="#" data-sort="status">Status</a></li>
+  </ul>
+</div>
+<table id="tbl">
+  <tr><th>Item</th></tr>
+  <tr><td>Alpha</td></tr>
+  <tr><td>Beta</td></tr>
+</table>
+</main>
+<script>
+document.getElementById('sort-btn').onclick = (e) => {
+  const m = document.getElementById('sort-menu');
+  const open = !m.classList.contains('show');
+  m.classList.toggle('show', open);
+  e.currentTarget.setAttribute('aria-expanded', String(open));
+};
+document.querySelectorAll('.dropdown-item').forEach(item => {
+  item.onclick = (e) => {
+    e.preventDefault();
+    document.querySelectorAll('.dropdown-item').forEach(i => i.classList.remove('active'));
+    item.classList.add('active');
+    document.getElementById('sort-menu').classList.remove('show');
+    document.getElementById('sort-btn').setAttribute('aria-expanded', 'false');
+  };
+});
+</script></body></html>`);
+    });
+
+    await new Promise<void>((r) => sortSite.listen(0, '127.0.0.1', r));
+    sortUrl = `http://127.0.0.1:${(sortSite.address() as AddressInfo).port}`;
+
+    const testC = await launchForTest({ baseUrl: sortUrl, blockExternal: true });
+    try {
+      const guard = new ActionGuard({ keywords: config.dangerousActions.keywords, allowMethods: config.dangerousActions.allowMethods, origin: sortUrl });
+      testC.setRequestGuard(guard.asRequestGuard());
+      await testC.navigate(sortUrl);
+      await testC.settle(150);
+      const model = await buildPageModel(testC);
+      const plan = selectTests(classifyPage(model), model, config);
+
+      const results: FunctionalResult[] = await runFunctionalTests({
+        controller: testC,
+        guard,
+        pageUrl: testC.page.url(),
+        model,
+        config,
+        budget: new ActionBudget(100),
+        plan,
+      });
+
+      // 1. None of the dropdown options should be classified as tabs
+      const tabs = results.filter((r) => r.check === 'tab-switch');
+      expect(tabs).toHaveLength(0);
+
+      // 2. The dropdown button itself should be tested and pass
+      const dropdownBtn = results.filter((r) => r.element?.name === 'Sort by');
+      expect(dropdownBtn.length).toBeGreaterThan(0);
+      expect(dropdownBtn[0]?.status).toBe('pass');
+
+      // 3. The safe options should be executed
+      const options = results.filter((r) => r.check === 'disclosure-option');
+      expect(options.length).toBeGreaterThanOrEqual(2);
+      expect(options.every((r) => r.status === 'pass')).toBe(true);
+
+      // 4. No confirmed bugs on ordinary table text or dropdown state changes
+      expect(results.filter((r) => classifyResult(r) === 'BUG')).toHaveLength(0);
+    } finally {
+      await testC.close();
+      sortSite.closeAllConnections?.();
+      await new Promise((r) => sortSite.close(() => r(undefined)));
+    }
+  }, 60_000);
+
+  it('executes every option in a multi-option menu as a distinct UI state and audits each resulting state', async () => {
+    let multiSite: http.Server;
+    let multiUrl: string;
+
+    multiSite = http.createServer((req, res) => {
+      res.setHeader('content-type', 'text/html');
+      res.end(`<!doctype html><html lang="en"><head><title>Multi-State Menu Test</title>
+<style>
+body { font-family: sans-serif; margin: 24px; }
+.dropdown { position: relative; display: inline-block; margin-bottom: 20px; }
+.dropdown-menu { display: none; position: absolute; background: #fff; border: 1px solid #ccc; padding: 8px; list-style: none; }
+.dropdown-menu.show { display: block; }
+.dropdown-item { display: block; padding: 6px 12px; cursor: pointer; text-decoration: none; color: #333; }
+.view-panel { display: none; padding: 16px; border: 1px solid #ddd; margin-top: 10px; }
+.view-panel.active { display: block; }
+.clipped-text { width: 70px; height: 20px; overflow: hidden; white-space: nowrap; }
+</style></head><body>
+<main><h1>Multi-State Menu</h1>
+<div class="dropdown">
+  <button type="button" id="menu-trigger" data-toggle="dropdown" aria-haspopup="true" aria-expanded="false">View Options</button>
+  <ul class="dropdown-menu" id="menu-list">
+    <li><a class="dropdown-item" href="#" id="opt-summary">Summary View</a></li>
+    <li><a class="dropdown-item" href="#" id="opt-analytics">Analytics View</a></li>
+    <li><a class="dropdown-item" href="#" id="opt-settings">Settings View</a></li>
+  </ul>
+</div>
+<div class="view-panel" id="panel-summary">
+  <h2>Summary Content</h2>
+  <label><input type="checkbox" id="chk-summary" checked /> Enable Summary</label>
+</div>
+<div class="view-panel" id="panel-analytics">
+  <h2>Analytics Content</h2>
+  <label><input type="checkbox" id="chk-analytics" /> Track Metrics</label>
+  <div class="clipped-text" id="analytics-clipped">Clipped analytics description text without ellipsis</div>
+</div>
+<div class="view-panel" id="panel-settings">
+  <h2>Settings Content</h2>
+  <label><input type="checkbox" id="chk-settings" checked /> Auto-refresh</label>
+</div>
+</main>
+<script>
+document.getElementById('menu-trigger').onclick = (e) => {
+  const m = document.getElementById('menu-list');
+  const open = !m.classList.contains('show');
+  m.classList.toggle('show', open);
+  e.currentTarget.setAttribute('aria-expanded', String(open));
+};
+function showPanel(id) {
+  document.querySelectorAll('.view-panel').forEach(p => p.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  document.getElementById('menu-list').classList.remove('show');
+  document.getElementById('menu-trigger').setAttribute('aria-expanded', 'false');
+}
+document.getElementById('opt-summary').onclick = (e) => { e.preventDefault(); showPanel('panel-summary'); };
+document.getElementById('opt-analytics').onclick = (e) => { e.preventDefault(); showPanel('panel-analytics'); };
+document.getElementById('opt-settings').onclick = (e) => { e.preventDefault(); showPanel('panel-settings'); };
+</script></body></html>`);
+    });
+
+    await new Promise<void>((r) => multiSite.listen(0, '127.0.0.1', r));
+    multiUrl = `http://127.0.0.1:${(multiSite.address() as AddressInfo).port}`;
+
+    const testC = await launchForTest({ baseUrl: multiUrl, blockExternal: true });
+    try {
+      const guard = new ActionGuard({ keywords: config.dangerousActions.keywords, allowMethods: config.dangerousActions.allowMethods, origin: multiUrl });
+      testC.setRequestGuard(guard.asRequestGuard());
+      await testC.navigate(multiUrl);
+      await testC.settle(150);
+      const model = await buildPageModel(testC);
+      const plan = selectTests(classifyPage(model), model, config);
+
+      const results: FunctionalResult[] = await runFunctionalTests({
+        controller: testC,
+        guard,
+        pageUrl: testC.page.url(),
+        model,
+        config,
+        budget: new ActionBudget(150),
+        plan,
+      });
+
+      // 1. Every option in the menu was clicked
+      const optionResults = results.filter((r) => r.check === 'disclosure-option');
+      expect(optionResults.length).toBe(3);
+      expect(optionResults.map((r) => r.element?.name).sort()).toEqual(['Analytics View', 'Settings View', 'Summary View']);
+      expect(optionResults.every((r) => r.status === 'pass')).toBe(true);
+
+      // 2. Each resulting state was audited (detecting clipped text revealed in Analytics View)
+      const auditFindings = results.filter((r) => r.check === 'geometry.text-clipping');
+      expect(auditFindings.length).toBeGreaterThan(0);
+      expect(auditFindings[0]?.status).toBe('fail');
+
+      // 3. Safe controls inside newly revealed states were tested and restored
+      const checkboxResults = results.filter((r) => r.check.startsWith('reversible-'));
+      expect(checkboxResults.length).toBeGreaterThanOrEqual(2);
+    } finally {
+      await testC.close();
+      multiSite.closeAllConnections?.();
+      await new Promise((r) => multiSite.close(() => r(undefined)));
+    }
+  }, 60_000);
 });

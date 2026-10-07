@@ -25,6 +25,8 @@ import {
   type InferredIntent,
   type VerificationVerdict,
 } from '../functional/index.js';
+import { auditStateWithScrolling } from '../functional/audit.js';
+import { fingerprint } from '../rules/helpers.js';
 import { runCounts } from '../reporting/data.js';
 import { generateReports } from '../reporting/index.js';
 import { collectRuleContext } from '../rules/context.js';
@@ -458,6 +460,14 @@ export class RunExecutor {
     const ctx = await collectRuleContext(c, { config: cfg, model, network, console: consoleEv, functional: [], axe, keyboard, visual: vis.result });
     const res = await this.registry.run(ctx, (r) => !r.id.startsWith('functional.'));
     for (const e of res.errors) this.hooks.emit('warning', `rule ${e.ruleId}: ${e.message}`);
+    const scrolled = await auditStateWithScrolling(c, cfg, this.registry).catch(() => []);
+    const seenFps = new Set(res.findings.map((f) => fingerprint(f)));
+    for (const sf of scrolled) {
+      if (!seenFps.has(fingerprint(sf))) {
+        seenFps.add(fingerprint(sf));
+        res.findings.push(sf);
+      }
+    }
     let pageEv: PageEvidence | null = null;
     if (res.findings.length > 0) {
       pageEv = await capturePageEvidence(c, this.deps.evidence, this.runId, ctx, vis);
@@ -491,11 +501,12 @@ export class RunExecutor {
       const needCapture: { id: string; finding: Finding }[] = [];
       this.snap.currentAction = 'testing elements';
       const functional = await runFunctionalTests({
-        controller: c, guard: this.guard, pageUrl: url, model: tested, config: cfg, budget: this.budget, testedLinks: this.testedLinks, plan, pageOnly: this.request.scope === 'page', workflow: this.workflowFor(url),
+        controller: c, guard: this.guard, pageUrl: url, model: tested, config: cfg, budget: this.budget, testedLinks: this.testedLinks, plan, pageOnly: this.request.scope === 'page', workflow: this.workflowFor(url), registry: this.registry,
         onResult: (r) => this.recordResult(url, vp, r, needCapture),
         onAction: (a) => {
           if (a.buffer) {
             this.hooks.setFrame?.({ url, viewport: vp.name, action: `${a.phase ? `[${a.phase}] ` : ''}${a.type} ${a.target}`, buffer: a.buffer });
+            this.hooks.emit('frame', `frame @ ${url} [${vp.name}]`, { url, viewport: vp.name, action: `${a.phase ? `[${a.phase}] ` : ''}${a.type} ${a.target}`, phase: a.phase, box: a.box });
           }
           this.action('functional', a.type, a.target, a.ok, a.detail, url, vp.name, a.box, {
             phase: a.phase,
@@ -542,8 +553,14 @@ export class RunExecutor {
     const rule = this.registry.get(ruleId);
     if (producesFinding(r) && rule && !this.config.rules.disabled.includes(ruleId)) {
       const base = findingFromResult(rule, { page: url, viewport: vp }, r);
-      const override = this.config.rules.severityOverrides[ruleId];
-      const finding: Finding = override ? { ...base, severity: override } : base;
+      const originalRuleId = (r.details as { originalRuleId?: string } | undefined)?.originalRuleId;
+      const effectiveRuleId = originalRuleId ?? base.ruleId;
+      const override = this.config.rules.severityOverrides[effectiveRuleId] ?? this.config.rules.severityOverrides[ruleId];
+      const finding: Finding = {
+        ...base,
+        ruleId: effectiveRuleId,
+        severity: override ?? base.severity,
+      };
       const own = this.saveActionEvidence(r, url, vp.name);
       // the same user-facing problem already reported by a page check (an overlap that makes the control unclickable): one finding
       const known = r.check === 'clickable' ? sameRootCause(finding, this.db.listFindings(this.runId)) : undefined;

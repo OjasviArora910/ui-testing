@@ -58,9 +58,9 @@ const EXTRACT_DOM_STATE_SCRIPT = `((targetSel) => {
   const all = b.getElementsByTagName('*');
   for (let i = 0; i < all.length && i < 4000; i++) {
     // state carried by attributes: which slide/panel/item is active, shown or selected
-    for (const k of STATE_ATTRS) { const v = all[i].getAttribute(k); if (v !== null) attrs += k + '=' + v + ';'; }
+    for (const k of STATE_ATTRS) { const v = all[i].getAttribute(k); if (v !== null) attrs += i + ':' + k + '=' + v + ';'; }
     // inline style in canonical form (screenshots rewrite the raw attribute on inputs without changing any style)
-    const css = all[i].style ? all[i].style.cssText.replace(/caret-color:[^;]*;?\s*/g, '') : ''; if (css) attrs += 'style=' + css + ';';
+    const css = all[i].style ? all[i].style.cssText.replace(/caret-color:[^;]*;?\s*/g, '') : ''; if (css) attrs += i + ':style=' + css + ';';
     const r = all[i].getBoundingClientRect();
     layout += Math.round(r.width) + 'x' + Math.round(r.height) + '@' + Math.round(r.left + scrollX) + ',' + Math.round(r.top + scrollY) + ';';
   }
@@ -306,8 +306,8 @@ export async function observeAction(
 
   const domAdded = Math.max(0, rawPost.elementCount - pre.elementCount);
   const domRemoved = Math.max(0, pre.elementCount - rawPost.elementCount);
-  // domDigest starts with the body text length captured before the action
-  const textChanged = rawPost.bodyTextLength !== Number(pre.domDigest.split('|')[0]);
+  // domDigest starts with the body text length captured before the action; textChanged also verifies content hash
+  const textChanged = (pre.signals && rawPost.signals && pre.signals.text !== rawPost.signals.text) || rawPost.bodyTextLength !== Number(pre.domDigest.split('|')[0]);
 
   const attrChanges: string[] = [];
   if (pre.targetState && rawPost.targetState) {

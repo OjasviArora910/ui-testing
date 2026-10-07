@@ -45,9 +45,9 @@ export function modalTriggers(model: PageModel): { element: ModelElement; confid
     if (!b.visible || !b.enabled) continue;
     const intent = classifyElementIntent(toClassifiable(b), model);
     if (intent.kind !== 'OPEN_MODAL') continue;
-    // aria-haspopup alone may also announce a menu; a dialog in the DOM makes the dialog reading certain.
-    const declared = b.aria?.haspopup === true && model.dialogs.length > 0;
-    out.push({ element: b, confidence: declared ? 'HIGH' : model.dialogs.length > 0 ? 'MEDIUM' : 'LOW' });
+    // aria-haspopup="dialog" or aria-haspopup with dialog in DOM makes the dialog reading certain.
+    const declared = (b.aria?.haspopup === 'dialog' || Boolean(b.aria?.haspopup)) && model.dialogs.length > 0;
+    out.push({ element: b, confidence: declared || intent.confidence === 'HIGH' ? 'HIGH' : model.dialogs.length > 0 ? 'MEDIUM' : 'LOW' });
   }
   return out;
 }

@@ -72,9 +72,9 @@ const NEVER_ALLOWED_PATH = /delete|remove|purge|destroy|erase|wipe|drop|clear|re
 /** Always dangerous, regardless of config: they end sessions or move money. */
 const BUILTIN_KEYWORDS = ['logout', 'log out', 'sign out', 'signout', 'cancel subscription', 'place order', 'submit order', 'send money', 'withdraw', 'transfer funds',
   'create', 'save', 'update', 'delete', 'remove', 'assign', 'publish', 'submit', 'lock out', 'lockout', 'confirm', 'yes',
-  'purge', 'destroy', 'erase', 'wipe', 'trash', 'permanently'];
+  'purge', 'destroy', 'erase', 'wipe', 'trash', 'permanently', 'copy', 'duplicate', 'clone'];
 /** Keywords that only create or change something. Every other keyword (built in or configured) is destructive. */
-const MUTATING_KEYWORDS = new Set(['create', 'save', 'update', 'assign', 'publish', 'submit', 'confirm', 'yes']);
+const MUTATING_KEYWORDS = new Set(['create', 'save', 'update', 'assign', 'publish', 'submit', 'confirm', 'yes', 'copy', 'duplicate', 'clone']);
 /** A request path containing any of these never leaves the browser with a write method, whatever was authorized. */
 const DESTRUCTIVE_PATH = /delete|remove|purge|destroy|erase|wipe|drop|truncate|trash|lock.?out|logout|signout|deactivate|terminate|revoke/i;
 const PAYMENT_FIELD = /(card|cvv|cvc|iban|routing|account.?number|cc-)/i;
@@ -212,6 +212,19 @@ export class ActionGuard {
     const target = a.kind === 'navigate' ? a.url : a.href;
     if ((a.kind === 'navigate' || a.href) && target && !this.isSameOrigin(target)) {
       return { allowed: false, reason: 'cross-origin or non-http navigation is not allowed', matched: 'external' };
+    }
+    // Permission/configuration controls (check, fill, select, press) carry a DATA label — the name of the permission
+    // being configured — not an action command. "Send Publish Copy" checkbox configures a permission; it is not a
+    // command to publish. Only click, submit, hover, and navigate kinds represent actual actions where the label text
+    // describes what the control DOES. For configuration kinds we only block the NEVER access-removing patterns.
+    const isConfigKind = a.kind === 'check' || a.kind === 'fill' || a.kind === 'select' || a.kind === 'press';
+    if (isConfigKind) {
+      // Still block controls whose label explicitly removes access from someone (those are refused by NEVER in reversible.ts,
+      // but a direct guard.check call from the explorer uses this path too).
+      if ((a.kind === 'fill' || a.kind === 'select') && (PAYMENT_FIELD.test(a.fieldName ?? '') || PAYMENT_FIELD.test(a.autocomplete ?? ''))) {
+        return { allowed: false, reason: 'payment-related field', matched: 'payment-field' };
+      }
+      return { allowed: true };
     }
     const kw = this.matchKeyword(a.text, a.name, a.selector, this.urlText(target), this.urlText(a.formAction));
     if (kw) {

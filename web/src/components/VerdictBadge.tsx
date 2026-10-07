@@ -18,6 +18,8 @@ export function VerdictBadge({ verdict, small }: VerdictBadgeProps) {
         return <IconCritical style={{ width: small ? 12 : 14, height: small ? 12 : 14 }} />;
       case 'BLOCKED_PENDING_REVIEW':
         return <IconShield style={{ width: small ? 12 : 14, height: small ? 12 : 14 }} />;
+      case 'INCOMPLETE':
+        return <IconInfo style={{ width: small ? 12 : 14, height: small ? 12 : 14 }} />;
       default:
         return <IconInfo style={{ width: small ? 12 : 14, height: small ? 12 : 14 }} />;
     }

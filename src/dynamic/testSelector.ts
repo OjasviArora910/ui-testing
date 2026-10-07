@@ -63,6 +63,9 @@ export function selectTests(profile: PageProfile, model: PageModel, config: QACo
   const table = hasType(profile, 'TABLE_LIST');
   if (table) select('table', 'Table rendering and overflow checks', 'TABLE_LIST', table.signals.join('; '), table.confidence);
   else skip('table', 'Table checks', 'no data table detected');
+  const sliders = model.interactive.filter((el) => el.meta?.inputType === 'range' || el.role === 'slider' ||
+    /(^|\s)(ui-slider-handle|noUi-handle|rc-slider-handle|MuiSlider-thumb|slider-handle)(\s|$)/.test(String(el.meta?.className ?? '')));
+  if (sliders.length > 0) skip('sliders', 'Slider controls', `${sliders.length} slider control(s) discovered; explicitly not tested`);
 
   // ---- links
   if (model.links.some((l) => l.visible)) {

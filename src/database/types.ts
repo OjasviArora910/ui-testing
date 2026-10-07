@@ -8,7 +8,7 @@ import type { Finding } from '../shared/types.js';
 export const RunStatusSchema = z.enum(['CREATED', 'AUTHENTICATING', 'DISCOVERING', 'TESTING', 'ANALYZING', 'REVIEW', 'REPORTING', 'COMPLETED', 'ABORTED', 'ERROR']);
 export type RunStatus = z.infer<typeof RunStatusSchema>;
 
-export const VerdictSchema = z.enum(['PASS', 'PASS_WITH_WARNINGS', 'FAILED', 'BLOCKED_PENDING_REVIEW']);
+export const VerdictSchema = z.enum(['PASS', 'PASS_WITH_WARNINGS', 'FAILED', 'BLOCKED_PENDING_REVIEW', 'INCOMPLETE']);
 export type Verdict = z.infer<typeof VerdictSchema>;
 
 export const DecisionSchema = z.enum(['CONFIRM_BUG', 'NOT_A_BUG', 'EXPECTED_BEHAVIOR', 'NEEDS_INVESTIGATION']);

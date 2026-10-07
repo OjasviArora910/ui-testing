@@ -150,11 +150,10 @@ for (const id of ['notify', 'lock']) document.getElementById(id).addEventListene
     expect((log.open ?? []).some((v) => /Beta|pencil2/.test(v))).toBe(false); // one row is enough
 
     // inside the revealed editor: reversible controls were tested and put back exactly
-    expect(of(/Contacts access/, 'reversible-slider').every((r) => r.status === 'pass'), say).toBe(true);
-    expect(of(/Contacts access/, 'reversible-slider').length).toBeGreaterThan(0);
+    expect(log.perm).toBeUndefined(); // sliders are discovered but deliberately not operated
     expect(of(/Send notifications/, 'reversible-toggle').every((r) => r.status === 'pass') && of(/Send notifications/).length > 0, say).toBe(true);
     expect(of(/Scope/, 'reversible-select').length, say).toBeGreaterThan(0);
-    for (const [control, start] of Object.entries({ perm: '2', notify: 'true', scope: 'team' })) {
+    for (const [control, start] of Object.entries({ notify: 'true', scope: 'team' })) {
       const v = log[control] ?? [];
       expect(v.some((x) => x !== start), `${control} changed: ${v.join(',')}`).toBe(true);
       expect(v.length % 2, `${control} changes come in change/restore pairs: ${v.join(',')}`).toBe(0);

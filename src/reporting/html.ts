@@ -5,7 +5,7 @@ import type { ReportData, ReportFinding } from './data.js';
 
 export const esc = (s: unknown): string => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 
-const VERDICT_COLOR: Record<string, string> = { PASS: '#1a7f37', PASS_WITH_WARNINGS: '#9a6700', FAILED: '#cf222e', BLOCKED_PENDING_REVIEW: '#8250df' };
+const VERDICT_COLOR: Record<string, string> = { PASS: '#1a7f37', PASS_WITH_WARNINGS: '#9a6700', FAILED: '#cf222e', BLOCKED_PENDING_REVIEW: '#8250df', INCOMPLETE: '#8250df' };
 const SEV_COLOR: Record<string, string> = { critical: '#cf222e', major: '#bc4c00', minor: '#9a6700', info: '#57606a' };
 const CLASS_COLOR: Record<string, string> = { BUG: '#cf222e', WARNING: '#9a6700', EXPECTED: '#1a7f37', NEEDS_REVIEW: '#8250df', BLOCKED_BY_SAFETY: '#57606a', ACCESSIBILITY: '#0969da', INCONCLUSIVE: '#8c959f' };
 const STATE_LABEL: Record<string, string> = { defect: 'Defect', pending: 'Needs review', confirmed: 'Confirmed bug', dismissed: 'Dismissed', investigating: 'Investigating' };
@@ -95,7 +95,7 @@ table{border-collapse:collapse;width:100%;background:#fff}td,th{border:1px solid
 </style></head><body><main>
 <h1>QA report</h1><p class="meta">${esc(data.run.url)} · run ${esc(data.run.id)} · mode ${esc(data.run.mode)} · ${esc(data.run.finishedAt ?? data.generatedAt)}</p>
 <p><span class="verdict" style="background:${VERDICT_COLOR[data.run.verdict]}">${esc(data.run.verdict)}</span></p>
-${data.incomplete ? `<p class="note"><strong>Incomplete run</strong> (${esc(data.run.abortReason ?? data.run.error ?? data.run.status)}). Results cover only what was tested before the run stopped.</p>` : ''}
+${data.incomplete ? `<p class="note"><strong>Incomplete coverage</strong>${data.run.abortReason || data.run.error ? ` (${esc(data.run.abortReason ?? data.run.error)})` : ''}. ${data.summary.coverage?.inconclusive ? `${data.summary.coverage.inconclusive} interaction(s) could not be verified; the run is not reported as a pass.` : 'Results cover only the work completed before the run stopped.'}</p>` : ''}
 <div class="tiles"><div class="tile"><b>${s.pages}</b>pages tested</div><div class="tile"><b>${data.testResults.length}</b>interactions tested</div><div class="tile"><b>${data.testResults.filter((r) => r.classification === 'EXPECTED').length}</b>PASS</div><div class="tile"><b>${data.testResults.filter((r) => r.classification === 'INCONCLUSIVE' || r.classification === 'BLOCKED_BY_SAFETY' || r.classification === 'NEEDS_REVIEW').length}</b>INCONCLUSIVE / BLOCKED</div><div class="tile"><b>${s.counts?.bugs ?? 0}</b>CONFIRMED BUGS</div>${data.accessibility.enabled ? `<div class="tile"><b>${a11y.length}</b>accessibility</div>` : ''}<div class="tile"><b>${s.counts?.needsReview ?? 0}</b>observations (not bugs)</div><div class="tile"><b>${s.actions}</b>actions</div><div class="tile"><b>${s.guardBlocked}</b>blocked by safety guard</div></div>
 <p>${cats || '<span class="meta">No active findings.</span>'}</p>
 <p class="meta">Viewports: ${esc(data.limits.viewports.join(', '))} · limits: ${data.limits.maxPages} pages, ${data.limits.maxActions} actions, depth ${data.limits.maxDepth} · visual: ${s.visual.pass} pass, ${s.visual.fail} fail, ${s.visual.noBaseline} no baseline</p>

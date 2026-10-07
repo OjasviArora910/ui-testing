@@ -291,6 +291,8 @@ export interface FunctionalContext {
   workflow?: import('./workflow.js').WorkflowPolicy;
   /** Dynamic selection: when present, only the testers and elements it names are exercised. Absent => every generic suite runs. */
   plan?: TestPlan;
+  /** Active rule registry for generic UI/UX evaluation of rendered states. */
+  registry?: import('../rules/index.js').RuleRegistry;
   /** Called once for every finished element test, as soon as it finishes, so progress can be saved continuously. */
   onResult?: (r: FunctionalResult) => void;
   /** Real-time hook for orchestrator & simulator synchronization. */

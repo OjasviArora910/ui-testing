@@ -14,7 +14,7 @@ Usage:
              [--mode deterministic|ai_assisted|exploratory]
              [--page-only]                           Test only this exact URL (no crawl)
              [--max-pages N] [--max-depth N] [--max-actions N] [--viewports desktop,tablet,mobile]
-                                                  Run one test headlessly; exit code 0=PASS/WARN, 1=FAILED, 2=BLOCKED_PENDING_REVIEW, 3=error
+                                                  Run one test headlessly; exit code 0=PASS/WARN, 1=FAILED, 2=REVIEW/INCOMPLETE, 3=error
   qa runs                                         List recent runs
   qa resume  <runId>                              Resume an interrupted run
   qa baseline --run <id> --page <url> --viewport <name> [--by <name>]   Approve a run's screenshot as the visual baseline (human action)
@@ -115,7 +115,7 @@ async function main(): Promise<number> {
     if (run.error) console.log(`Error: ${run.error}`);
     for (const k of ['html', 'json', 'xml'] as const) { const f = orch.reportPath(runId, k); if (f) console.log(`Report (${k}): ${f}`); }
     if (run.status === 'ERROR') return 3;
-    return run.verdict === 'FAILED' ? 1 : run.verdict === 'BLOCKED_PENDING_REVIEW' ? 2 : 0;
+    return run.verdict === 'FAILED' ? 1 : run.verdict === 'BLOCKED_PENDING_REVIEW' || run.verdict === 'INCOMPLETE' ? 2 : 0;
   }
 
   console.log(HELP);

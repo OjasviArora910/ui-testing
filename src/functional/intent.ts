@@ -12,7 +12,7 @@ export interface ClassifiableElement {
   href?: string | null;
   aria?: {
     expanded?: string | null;
-    haspopup?: boolean;
+    haspopup?: boolean | string;
     modal?: boolean;
     disabled?: boolean;
     invalid?: boolean;
@@ -72,32 +72,7 @@ export function classifyElementIntent(
     };
   }
 
-  // 2. ACCORDION / COLLAPSE: <summary>, <details>, aria-expanded toggle
-  const isAriaExpanded = el.aria?.expanded !== null && el.aria?.expanded !== undefined;
-  if (
-    tag === 'summary' ||
-    lowerSel.includes('summary') ||
-    lowerSel.includes('accordion') ||
-    lowerSel.includes('collapse') ||
-    isAriaExpanded
-  ) {
-    const currentlyExpanded = el.aria?.expanded === 'true';
-    return {
-      kind: 'TOGGLE_ACCORDION',
-      confidence: tag === 'summary' || isAriaExpanded ? 'HIGH' : 'MEDIUM', // declared state vs. wording in a selector
-      summary: `Toggle accordion/collapsible "${label}"`,
-      expectedOutcome: {
-        description: currentlyExpanded
-          ? `Collapsible "${label}" should collapse and set aria-expanded="false"`
-          : `Collapsible "${label}" should expand and reveal content with aria-expanded="true"`,
-        expectedAriaExpanded: !currentlyExpanded,
-        expectedDomMutation: true,
-        targetSelector: selector,
-      },
-    };
-  }
-
-  // 3. MODAL DISMISS: Buttons inside dialogs or explicitly labeled close/dismiss/cancel
+  // 2. MODAL DISMISS: Buttons inside dialogs or explicitly labeled close/dismiss/cancel
   const isInsideDialog = lowerSel.includes('dialog') || lowerSel.includes('modal') || lowerSel.includes('.popup');
   if (
     MODAL_DISMISS_REGEX.test(lowerLabel) ||
@@ -119,20 +94,74 @@ export function classifyElementIntent(
     };
   }
 
-  // 4. OPEN MODAL: aria-haspopup="dialog" or explicit modal trigger
-  if (
-    el.aria?.haspopup ||
-    lowerSel.includes('modal-trigger') ||
-    lowerSel.includes('open-modal') ||
-    (MODAL_OPEN_REGEX.test(lowerLabel) && !href.startsWith('http'))
-  ) {
+  // 3. MENU / DROPDOWN / ELLIPSIS / DISCLOSURE
+  const isAriaExpanded = el.aria?.expanded !== null && el.aria?.expanded !== undefined;
+  const toggleAttr = (el.meta?.['data-toggle'] || el.meta?.['data-bs-toggle'] || '').toString().toLowerCase();
+  const isMenu = lowerSel.includes('dropdown') || lowerSel.includes('menu') || lowerSel.includes('actions') ||
+    toggleAttr === 'dropdown' || toggleAttr === 'collapse' ||
+    /(\b|_|-)(dropdown|menu|ellipsis|more|kebab|overflow|actions|options)(\b|_|-)/i.test(lowerSel + ' ' + (el.name || '') + ' ' + (el.text || '')) ||
+    /^(\.\.\.|…|more|actions|options)$/i.test(lowerLabel) ||
+    el.aria?.haspopup === 'menu' || el.aria?.haspopup === 'listbox' || el.aria?.haspopup === 'tree' || el.aria?.haspopup === 'grid' ||
+    (Boolean(el.aria?.haspopup) && (toggleAttr === 'dropdown' || lowerSel.includes('dropdown') || lowerSel.includes('menu')));
+
+  if (isMenu) {
+    const currentlyExpanded = el.aria?.expanded === 'true';
+    return {
+      kind: 'TOGGLE_ACCORDION',
+      confidence: 'HIGH',
+      summary: `Toggle dropdown/menu "${label || 'menu'}"`,
+      expectedOutcome: {
+        description: currentlyExpanded
+          ? `Dropdown/menu "${label || 'menu'}" should close or collapse`
+          : `Dropdown/menu "${label || 'menu'}" should open and reveal options`,
+        expectedAriaExpanded: !currentlyExpanded,
+        expectedDomMutation: true,
+        targetSelector: selector,
+      },
+    };
+  }
+
+  // 4. OPEN MODAL: aria-haspopup="dialog", explicit modal trigger, or popup when not a menu
+  const isModalTrigger = !isMenu && (el.aria?.haspopup === 'dialog' ||
+    (Boolean(el.aria?.haspopup) && (model?.dialogs.length ?? 0) > 0) ||
+    lowerSel.includes('modal') ||
+    lowerSel.includes('dialog') ||
+    lowerSel.includes('dlg') ||
+    (MODAL_OPEN_REGEX.test(lowerLabel) && !href.startsWith('http')));
+
+  if (isModalTrigger) {
+    const isDeclared = el.aria?.haspopup === 'dialog' || (Boolean(el.aria?.haspopup) && (model?.dialogs.length ?? 0) > 0);
     return {
       kind: 'OPEN_MODAL',
-      confidence: el.aria?.haspopup ? 'HIGH' : 'MEDIUM',
+      confidence: isDeclared || el.aria?.haspopup === 'dialog' || lowerSel.includes('modal') ? 'HIGH' : 'MEDIUM',
       summary: `Open modal/dialog via "${label}"`,
       expectedOutcome: {
         description: `A modal, dialog, or overlay should appear and become visible/active on screen`,
         expectedModalOpen: true,
+        expectedDomMutation: true,
+        targetSelector: selector,
+      },
+    };
+  }
+
+  // 5. ACCORDION / COLLAPSE / SUMMARY
+  if (
+    tag === 'summary' ||
+    lowerSel.includes('summary') ||
+    lowerSel.includes('accordion') ||
+    lowerSel.includes('collapse') ||
+    isAriaExpanded
+  ) {
+    const currentlyExpanded = el.aria?.expanded === 'true';
+    return {
+      kind: 'TOGGLE_ACCORDION',
+      confidence: tag === 'summary' || isAriaExpanded ? 'HIGH' : 'MEDIUM',
+      summary: `Toggle accordion/collapsible "${label}"`,
+      expectedOutcome: {
+        description: currentlyExpanded
+          ? `Collapsible "${label}" should collapse and set aria-expanded="false"`
+          : `Collapsible "${label}" should expand and reveal content with aria-expanded="true"`,
+        expectedAriaExpanded: !currentlyExpanded,
         expectedDomMutation: true,
         targetSelector: selector,
       },

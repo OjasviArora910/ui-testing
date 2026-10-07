@@ -4,6 +4,7 @@ import { clickAndObserve, notInteractable, prepareInteraction } from './interact
 import { exploreState, newExploration } from './explorer.js';
 import { rememberControls } from './reversible.js';
 import { capturePreActionSnapshot, traceOf } from './observer.js';
+import { inspectCurrentUI } from './audit.js';
 import type { FunctionalContext, FunctionalResult } from './types.js';
 import { verifyInteraction } from './verifier.js';
 
@@ -15,7 +16,7 @@ interface DialogState { open: number; modal: boolean; closeLabel: string | null 
 /** Visible open dialogs, whether any of them is modal, and (optionally) tags a close control inside the top-most one. */
 const DIALOG_STATE_SCRIPT = `((mark) => {
   const shown = (el) => { const r = el.getBoundingClientRect(); const cs = getComputedStyle(el); return r.width > 0 && r.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none'; };
-  const open = Array.from(document.querySelectorAll('dialog[open], [role=dialog]:not([hidden]), [role=alertdialog]:not([hidden]), [aria-modal=true]:not([hidden])')).filter(shown);
+  const open = Array.from(document.querySelectorAll('dialog[open], [role=dialog]:not([hidden]), [role=alertdialog]:not([hidden]), [aria-modal=true]:not([hidden]), .modal.show, .modal-open, .drawer.open, .modal.is-active')).filter(shown);
   const modal = open.some((d) => d.getAttribute('aria-modal') === 'true' || (d.tagName === 'DIALOG' && d.matches(':modal')));
   let closeLabel = null;
   document.querySelectorAll('[' + mark + ']').forEach((e) => e.removeAttribute(mark));
@@ -75,6 +76,7 @@ export async function testModals(ctx: FunctionalContext): Promise<FunctionalResu
   const state = (): Promise<DialogState> => c.page.evaluate(`${DIALOG_STATE_SCRIPT}(${JSON.stringify(CLOSE_MARK)})`) as Promise<DialogState>;
   const shot = (): Promise<Buffer | undefined> => c.page.screenshot({ type: 'jpeg', quality: 65 }).catch(() => undefined);
 
+  let needsReset = false;
   for (const { trigger: b, scenario } of ctx.plan?.modals ?? []) {
     if (ctx.budget.exhausted) break;
     const el = elementOf(b);
@@ -85,7 +87,10 @@ export async function testModals(ctx: FunctionalContext): Promise<FunctionalResu
       push({ ...BASE, check: 'guard', status: 'skipped', severity: 'info', basis: null, element: el, expected: 'Safe modal triggers are tested', actual: `Not clicked: ${decision.reason}`, details: { guard: decision } });
       continue;
     }
-    if (!(await resetPage(ctx))) break;
+    if (needsReset) {
+      if (!(await resetPage(ctx))) break;
+      needsReset = false;
+    }
     if (!ctx.budget.consume(2)) break;
 
     const intent = { ...classifyElementIntent(toClassifiable(b), model), confidence: scenario.confidence };
@@ -95,15 +100,23 @@ export async function testModals(ctx: FunctionalContext): Promise<FunctionalResu
 
     // ---- open
     const ready = await prepareInteraction(ctx, targetFor(b, model.buttons), b.selector);
+    const postScrollRawBox = (await c.locate({ css: b.selector }).boundingBox().catch(() => null)) ?? rawBox;
+    const activeBox = postScrollRawBox ? { ...postScrollRawBox, vpWidth: c.viewport.width, vpHeight: c.viewport.height } : box;
+
     if (!ready.ok) { push(notInteractable(BASE.kind, el, label, ready)); continue; }
     const before = await state();
     await rememberControls(c);
     const pre = await capturePreActionSnapshot(c, b.selector, { captureScreenshot: true });
+
+    ctx.onAction?.({ phase: 'TARGETED', type: 'target', target: label, ok: true, box: activeBox, intent, buffer: pre.screenshot, expected: intent.expectedOutcome.description });
+    ctx.onAction?.({ phase: 'CLICKING', type: 'click', target: label, ok: true, box: activeBox, intent, buffer: pre.screenshot });
+    await new Promise((r) => setTimeout(r, 50));
+
     const { click, observation } = await clickAndObserve(ctx, ready, b.selector, pre, intent, { minWaitMs: 200, maxWaitMs: 1200, captureScreenshot: true });
     const outcome = verifyInteraction({ intent, observation, clickResult: click, elementLabel: label, selector: b.selector });
     ctx.onAction?.({
       phase: 'RESULT', type: outcome.check, target: label, ok: outcome.verdict === 'PASS', verdict: outcome.verdict, confidence: outcome.confidence,
-      expected: outcome.expected, actual: outcome.actual, detail: outcome.reason, box, buffer: observation.screenshot, durationMs: observation.durationMs,
+      expected: outcome.expected, actual: outcome.actual, detail: outcome.reason, box: activeBox, buffer: observation.screenshot, durationMs: observation.durationMs,
     });
     const openProof = { before: pre.screenshot, screenshot: observation.screenshot, trace: traceOf(`click "${label}"`, observation) };
     const common = { ...BASE, element: el, expected: outcome.expected, actual: outcome.actual, confidence: outcome.confidence, durationMs: observation.durationMs };
@@ -116,7 +129,10 @@ export async function testModals(ctx: FunctionalContext): Promise<FunctionalResu
     if (opened.open <= before.open) continue; // a menu/popup rather than a dialog: nothing to close
 
     // ---- inside the dialog: its safe, reversible controls are tested and put back as they were. No button in it is clicked.
-    if (c.page.url() === pre.rawUrl) await exploreState(ctx, push, newExploration(), [label]).catch(() => false);
+    if (c.page.url() === pre.rawUrl) {
+      await inspectCurrentUI(ctx, `Modal: ${label}`, push);
+      await exploreState(ctx, push, newExploration(), [label]).catch(() => false);
+    }
 
     // ---- close: with the dialog's own close control. Keyboard behaviour is not part of UI/UX testing: Escape is only
     // pressed afterwards, if the dialog has no close control, to leave the page clean. It never produces a result.
@@ -142,6 +158,8 @@ export async function testModals(ctx: FunctionalContext): Promise<FunctionalResu
         trace: { action: `click "${closeLabel}"`, network: [], console: [], changes: ['dialog still open'] },
       });
       await c.press('Escape').catch(() => undefined);
+      const afterEsc = await state();
+      if (afterEsc.open >= opened.open) needsReset = true;
     } else if (now.open < opened.open) {
       push({ ...BASE, check: 'modal-close', status: 'pass', severity: 'info', basis: null, element: el, expected: closeExpected, actual: `Dialog closed with its "${closeLabel}" control` });
     }

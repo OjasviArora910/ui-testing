@@ -10,6 +10,22 @@ import type { Finding } from '../src/shared/types.js';
 const f = (o: Partial<Finding>): Finding => ({ ruleId: 'r', category: 'layout', severity: 'major', classification: 'defect', basis: 'deterministic', page: 'http://app.test/', viewport: 'desktop', element: null, expected: 'e', actual: 'a', evidence: ['ev_1'], ...o });
 
 describe('reports', () => {
+  it('labels substantial inconclusive interaction coverage as INCOMPLETE, never PASS', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-incomplete-'));
+    const db = QADatabase.open(':memory:', new Redactor());
+    const run = db.createRun({ url: 'http://app.test/', mode: 'deterministic', request: {}, config: { viewports: [{ name: 'desktop' }], maxPages: 5, maxActions: 10, maxDepth: 1 } });
+    db.setStatus(run.id, 'COMPLETED');
+    db.addTestResults(run.id, [1, 2, 3].map((n) => ({
+      page: 'http://app.test/', viewport: 'desktop', scenario: 'buttons', scenarioLabel: 'Button interaction', pageType: 'UNKNOWN_GENERAL',
+      reason: 'generic control', confidence: 'LOW' as const, kind: 'button', check: `control-${n}`, target: `Control ${n}`,
+      expected: 'visible response', actual: 'could not verify', classification: 'INCONCLUSIVE' as const,
+    })));
+    const out = generateReports(db, undefined, run.id, dir);
+    expect(out.data.run.verdict).toBe('INCOMPLETE');
+    expect(out.data.incomplete).toBe(true);
+    expect(fs.readFileSync(out.html, 'utf8')).toMatch(/3 interaction\(s\) could not be verified/);
+  });
+
   it('writes HTML, JSON and JUnit with the verdict; escapes page content', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-rep-'));
     const db = QADatabase.open(':memory:', new Redactor());

@@ -14,6 +14,7 @@ export async function testSearch(ctx: FunctionalContext): Promise<FunctionalResu
   const { controller: c, guard } = ctx;
   const results: FunctionalResult[] = [];
 
+  let needsReset = false;
   for (const { target, scenario } of ctx.plan?.searches ?? []) {
     if (ctx.budget.exhausted) break;
     const el = { selector: target.input, role: 'searchbox', name: target.label.slice(0, 80) };
@@ -23,7 +24,10 @@ export async function testSearch(ctx: FunctionalContext): Promise<FunctionalResu
       push({ ...BASE, check: 'guard', status: 'skipped', severity: 'info', basis: null, element: el, expected: 'Safe search inputs are exercised', actual: `Not used: ${decision.reason}`, details: { guard: decision } });
       continue;
     }
-    if (!(await resetPage(ctx))) break;
+    if (needsReset) {
+      if (!(await resetPage(ctx))) break;
+      needsReset = false;
+    }
     if (!ctx.budget.consume(2)) break;
 
     const intent: InferredIntent = {
@@ -33,12 +37,14 @@ export async function testSearch(ctx: FunctionalContext): Promise<FunctionalResu
     const loc = c.locate({ css: target.input });
     const rawBox = await loc.boundingBox().catch(() => null);
     const box = rawBox ? { ...rawBox, vpWidth: c.viewport.width, vpHeight: c.viewport.height } : null;
-    ctx.onAction?.({ phase: 'TARGETED', type: 'target', target: target.label, ok: true, box, intent, expected: intent.expectedOutcome.description });
 
     // Snapshot BEFORE typing: live filters react to the input event, not to Enter.
     const pre = await capturePreActionSnapshot(c, target.input, { captureScreenshot: true });
+
+    ctx.onAction?.({ phase: 'TARGETED', type: 'target', target: target.label, ok: true, box, intent, buffer: pre.screenshot, expected: intent.expectedOutcome.description });
+    ctx.onAction?.({ phase: 'CLICKING', type: 'fill', target: target.label, ok: true, box, intent, buffer: pre.screenshot });
+
     const fill = await c.fill({ css: target.input }, QUERY);
-    ctx.onAction?.({ phase: 'CLICKING', type: 'fill', target: target.label, ok: fill.ok, detail: fill.error, box, intent });
     const trigger = !fill.ok ? fill : target.submit ? await c.click({ css: target.submit }) : await c.press('Enter', { css: target.input });
     const observation = await observeAction(ctx, pre, intent, { minWaitMs: 200, maxWaitMs: 1500, captureScreenshot: true });
     const outcome = verifyInteraction({ intent, observation, clickResult: trigger, elementLabel: target.label, selector: target.input });
@@ -55,6 +61,13 @@ export async function testSearch(ctx: FunctionalContext): Promise<FunctionalResu
       const runtime = outcome.check === 'javascript-error' || outcome.check === 'network-failure';
       push({ ...common, check: outcome.check, status: 'fail', severity: runtime ? 'major' : 'minor', basis: 'deterministic', details: { reason: outcome.reason, rootCause: outcome.rootCause }, ...proof });
     } else push({ ...common, check: outcome.check, status: 'anomaly', severity: 'minor', basis: null, details: { reason: outcome.reason }, ...proof });
+
+    // Restore search input
+    await c.fill({ css: target.input }, '').catch(() => undefined);
+    if (target.submit) await c.click({ css: target.submit }).catch(() => undefined);
+    else await c.press('Enter', { css: target.input }).catch(() => undefined);
+    await c.settle(150);
+    if (c.page.url() !== pre.rawUrl) needsReset = true;
   }
   return results;
 }

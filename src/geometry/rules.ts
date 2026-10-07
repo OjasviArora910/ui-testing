@@ -82,8 +82,8 @@ export const textClippingRule: Rule = {
     for (const e of candidates(ctx)) {
       if (out.length >= MAX_PER_RULE) break;
       if (!textBearing(e) || isVisuallyHiddenPattern(e) || e.styles.webkitLineClamp && e.styles.webkitLineClamp !== 'none') continue;
-      const hClip = ['hidden', 'clip'].includes(e.styles.overflowX) && e.scroll.scrollWidth > e.scroll.clientWidth + 1;
-      const vClip = ['hidden', 'clip'].includes(e.styles.overflowY) && e.scroll.scrollHeight > e.scroll.clientHeight + 1;
+      const hClip = ['hidden', 'clip'].includes(e.styles.overflowX) && e.scroll.scrollWidth > e.scroll.clientWidth + 4;
+      const vClip = ['hidden', 'clip'].includes(e.styles.overflowY) && e.scroll.scrollHeight > e.scroll.clientHeight + 4;
       if (hClip && e.styles.textOverflow === 'ellipsis') continue; // intentional truncation
       if (!hClip && !vClip) continue;
       const dims = hClip ? `${e.scroll.scrollWidth}px of content in ${e.scroll.clientWidth}px` : `${e.scroll.scrollHeight}px of content in ${e.scroll.clientHeight}px`;
@@ -159,12 +159,14 @@ export const containerOverflowRule: Rule = {
       if (['img', 'table', 'video', 'canvas', 'iframe'].includes(e.tag) || inline(e)) continue; // handled by responsive rules
       if (['absolute', 'fixed', 'sticky'].includes(e.styles.position)) continue;
       const p = idx.parent(e);
-      if (!p || p.tag === 'body' || p.tag === 'html' || area(p.box) === 0) continue;
+      if (!p || p.tag === 'body' || p.tag === 'html' || area(p.box) === 0 || p.box.width < 40) continue;
       if (p.styles.overflowX !== 'visible' || p.styles.display === 'contents' || p.styles.display.includes('flex') && p.styles.flexWrap === 'wrap') continue;
       if (p.styles.display === 'table-cell' || p.styles.display === 'table-row') continue;
+      if (e.tag === 'span' && (e.className.includes('check') || e.className.includes('switch') || p.tag === 'label')) continue;
       const over = right(e.box) - right(p.box);
       const overLeft = p.box.x - e.box.x;
-      if (over <= 2 && overLeft <= 2) continue;
+      if (over < 10 && overLeft < 10) continue;
+      if (!textBearing(e) && !isInteractive(e) && e.box.width < 60) continue;
       out.push(makeFinding(containerOverflowRule, ctx, {
         classification: 'defect', element: elementRef(e),
         expected: 'Child content stays inside its parent container, or the container scrolls',

@@ -74,6 +74,9 @@ export function summarizeRun(db: QADatabase, runId: string, opts: { incomplete?:
   for (const f of active) byCategory[f.category] = (byCategory[f.category] ?? 0) + 1;
   for (const f of uiux) bySeverity[f.severity] = (bySeverity[f.severity] ?? 0) + 1;
   const actions = db.listActions(runId);
+  const coverage = runCounts(db, runId);
+  const significantInconclusive = coverage.inconclusive >= Math.max(3, Math.ceil(coverage.elementsTested * 0.2));
+  const incomplete = opts.incomplete === true || significantInconclusive;
   const visual = { pass: 0, fail: 0, noBaseline: 0 };
   for (const a of actions) if (a.source === 'visual') { if (a.type === 'PASS') visual.pass++; else if (a.type === 'FAIL') visual.fail++; else if (a.type === 'NO_BASELINE_AVAILABLE') visual.noBaseline++; }
   const summary: RunSummary = {
@@ -82,26 +85,28 @@ export function summarizeRun(db: QADatabase, runId: string, opts: { incomplete?:
     defects: uiux.filter((f) => f.resultClass === 'BUG').length,
     anomalies: uiux.filter((f) => f.resultClass === 'INCONCLUSIVE').length,
     counts: { ...countFindings(active), bugs: new Set(uiux.filter((f) => f.resultClass === 'BUG').map((f) => f.problemKey)).size, warnings: 0, needsReview: new Set(uiux.filter((f) => f.resultClass === 'INCONCLUSIVE').map((f) => f.problemKey)).size },
-    coverage: runCounts(db, runId),
+    coverage,
     byCategory, bySeverity,
     pendingReview: uiux.filter((f) => f.reviewState === 'pending' || f.reviewState === 'investigating').length,
     actions: actions.filter((a) => a.source !== 'visual' && a.source !== 'guard').length,
     guardBlocked: actions.filter((a) => a.source === 'guard').length,
-    visual, incomplete: opts.incomplete,
+    visual, incomplete,
   };
   const a11y = (db.getRun(runId)?.config as { accessibility?: { failRun?: boolean } } | null)?.accessibility;
   // A run that failed to run (target unreachable, authentication required) has not passed anything.
   if (db.getRun(runId)?.status === 'ERROR') return { summary, verdict: 'FAILED' };
   // Only CONFIRMED bugs (and, when required, accessibility findings) decide the verdict. Observations never fail a run.
   const decisive = findings.filter((f) => f.resultClass === 'BUG' || f.track === 'accessibility');
-  return { summary, verdict: computeVerdict(decisive, { accessibilityFailRun: a11y?.failRun === true }) };
+  const computed = computeVerdict(decisive, { accessibilityFailRun: a11y?.failRun === true });
+  return { summary, verdict: incomplete && (computed === 'PASS' || computed === 'PASS_WITH_WARNINGS') ? 'INCOMPLETE' : computed };
 }
 
 export function buildReportData(db: QADatabase, runId: string): ReportData {
   const run = db.getRun(runId);
   if (!run) throw new Error(`Unknown run ${runId}`);
-  const incomplete = run.status === 'ABORTED' || run.status === 'ERROR' || !!run.summary?.incomplete;
-  const { summary, verdict } = summarizeRun(db, runId, { incomplete });
+  const interrupted = run.status === 'ABORTED' || run.status === 'ERROR' || !!run.summary?.incomplete;
+  const { summary, verdict } = summarizeRun(db, runId, { incomplete: interrupted });
+  const incomplete = summary.incomplete === true;
   const evidence = new Map(db.listEvidence(runId).map((e) => [e.id, e]));
   const analyses = db.analysesByFinding(runId);
   const cfg = run.config as { viewports?: { name: string }[]; maxPages?: number; maxActions?: number; maxDepth?: number; accessibility?: { enabled?: boolean; failRun?: boolean } };

@@ -107,10 +107,10 @@ describe('creation wizard: traversed, explored step by step, committed once (bro
     expect(of('wizard-next')[0]!.actual).toMatch(/led from step 1 to another step: .*active: Permissions/);
     expect(of('wizard-next')[1]!.actual).toMatch(/led from step 2 to another step: .*active: Assignment/);
     // the controls of every step were found on that step, tested and restored exactly
-    for (const label of [/Contacts access/, /Reports/, /All users group/, /Description/]) {
+    for (const label of [/Reports/, /All users group/, /Description/]) {
       expect(r.results.filter((x) => label.test(x.target ?? '') && x.check.startsWith('reversible-')).map((x) => x.classification), `${label}\n${r.say}`).toEqual(['EXPECTED']);
     }
-    for (const [control, start] of Object.entries({ perm: '2', reports: 'true', grp: 'false' })) {
+    for (const [control, start] of Object.entries({ reports: 'true', grp: 'false' })) {
       const v = r.site.log[control] ?? [];
       expect(v, `${control}\n${r.say}`).toHaveLength(2);
       expect(v[1]).toBe(start);

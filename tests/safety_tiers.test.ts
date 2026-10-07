@@ -102,4 +102,62 @@ describe('safety tiers: destructive never, mutating only when explicitly authori
     expect(send(g, 'POST', '/api/GetRolesForUser').allowed).toBe(false);
     expect(send(g, 'POST', '/api/x')).toMatchObject({ allowed: false, reason: 'write method POST blocked' });
   });
+
+  /**
+   * REGRESSION: Permission control labels contain permission NAMES, not action commands.
+   *
+   * "Send Publish Copy" is the name of a permission setting — a checkbox whose label says "Send Publish Copy" is
+   * configuring whether someone has that permission. It is NOT a command to publish something.
+   * "Delete Permission" (a checkbox) configures a permission — it is not a command to delete something.
+   *
+   * Safety must distinguish:
+   *   <checkbox> "Send Publish Copy"  → reversible configuration DATA → ALLOWED (check kind)
+   *   <checkbox> "Delete Permission"  → reversible configuration DATA → ALLOWED (check kind)
+   *   <button>   "Publish"            → action command → BLOCKED       (click kind)
+   *   <button>   "Delete"             → action command → BLOCKED       (click kind)
+   *   <a role=menuitem> "Delete"      → action command → BLOCKED       (click kind)
+   *
+   * The element semantics / action kind must matter more than arbitrary text inside configuration data.
+   */
+  it('permission control labels with dangerous words are allowed; actual action buttons with the same words are blocked', () => {
+    const g = mk();
+
+    // Checkboxes (kind=check): label is a PERMISSION NAME, not an action. Must be allowed regardless of words.
+    expect(g.check({ kind: 'check', text: 'Send Publish Copy', name: 'Send Publish Copy' }).allowed, 'check: Send Publish Copy').toBe(true);
+    expect(g.check({ kind: 'check', text: 'Delete Permission', name: 'Delete Permission' }).allowed, 'check: Delete Permission').toBe(true);
+    expect(g.check({ kind: 'check', text: 'Remove Access', name: 'Remove Access' }).allowed, 'check: Remove Access').toBe(true);
+    expect(g.check({ kind: 'check', text: 'Assign Role', name: 'Assign Role' }).allowed, 'check: Assign Role').toBe(true);
+    expect(g.check({ kind: 'check', text: 'Create Records', name: 'Create Records' }).allowed, 'check: Create Records').toBe(true);
+    expect(g.check({ kind: 'check', text: 'Update Contacts', name: 'Update Contacts' }).allowed, 'check: Update Contacts').toBe(true);
+    expect(g.check({ kind: 'check', text: 'Send Emails', name: 'Send Emails' }).allowed, 'check: Send Emails').toBe(true);
+    expect(g.check({ kind: 'check', text: 'Export Data', name: 'Export Data' }).allowed, 'check: Export Data').toBe(true);
+
+    // Sliders (kind=press): same reasoning — the label describes the permission, not an action.
+    expect(g.check({ kind: 'press', text: 'Interactive Data', name: 'Interactive Data' }).allowed, 'press: Interactive Data').toBe(true);
+    expect(g.check({ kind: 'press', text: 'Interactive Forms', name: 'Interactive Forms' }).allowed, 'press: Interactive Forms').toBe(true);
+    expect(g.check({ kind: 'press', text: 'Deal Registration User', name: 'Deal Registration User' }).allowed, 'press: Deal Registration User').toBe(true);
+    expect(g.check({ kind: 'press', text: 'MDF User access', name: 'MDF User access' }).allowed, 'press: MDF User access').toBe(true);
+    expect(g.check({ kind: 'press', text: 'Lead Scoring', name: 'Lead Scoring' }).allowed, 'press: Lead Scoring').toBe(true);
+
+    // Selects (kind=select): configuration data — label of the dropdown, not a command.
+    expect(g.check({ kind: 'select', text: 'Publish Scope', name: 'Publish Scope', fieldName: 'Publish Scope' }).allowed, 'select: Publish Scope').toBe(true);
+    expect(g.check({ kind: 'select', text: 'Delete Confirmation', name: 'Delete Confirmation', fieldName: 'Delete Confirmation' }).allowed, 'select: Delete Confirmation').toBe(true);
+
+    // Fill (kind=fill): configuration data — text field label, not a command.
+    expect(g.check({ kind: 'fill', text: 'Delete reason', name: 'Delete reason', fieldName: 'Delete reason' }).allowed, 'fill: Delete reason').toBe(true);
+
+    // Actual buttons and links: the same words ARE action commands here and must be blocked.
+    expect(g.check({ kind: 'click', text: 'Publish' }).allowed, 'click: Publish').toBe(false);
+    expect(g.check({ kind: 'click', text: 'Delete' }).allowed, 'click: Delete').toBe(false);
+    expect(g.check({ kind: 'click', text: 'Remove' }).allowed, 'click: Remove').toBe(false);
+    expect(g.check({ kind: 'click', text: 'Send Publish Copy' }).allowed, 'click: Send Publish Copy').toBe(false);
+    expect(g.check({ kind: 'click', text: 'Delete Permission' }).allowed, 'click: Delete Permission').toBe(false);
+
+    // Payment fields still blocked regardless of kind
+    expect(g.check({ kind: 'fill', fieldName: 'card-number', text: '' }).allowed, 'fill: card-number').toBe(false);
+    expect(g.check({ kind: 'select', fieldName: 'cvv', text: '' }).allowed, 'select: cvv').toBe(false);
+
+    // NEVER patterns (access-removal) are caught by the NEVER regex in reversible.ts, not guard; but submit/navigate still block
+    expect(g.check({ kind: 'submit', text: 'Log out' }).allowed, 'submit: Log out').toBe(false);
+  });
 });
