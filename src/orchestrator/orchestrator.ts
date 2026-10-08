@@ -216,12 +216,29 @@ export class Orchestrator {
     return fs.existsSync(f) ? f : null;
   }
 
-  setFrame(runId: string, frame: { url: string; viewport: string; action: string; buffer?: Buffer }): void {
+  private frameSeq = 0;
+  /** The last few frames of each run by id, so the dashboard can show exactly the screenshot an overlay box was measured on. */
+  private recentFrames = new Map<string, Map<number, Buffer>>();
+
+  /** Stores the frame as the run's latest and returns its id. */
+  setFrame(runId: string, frame: { url: string; viewport: string; action: string; buffer?: Buffer }): number {
+    const id = ++this.frameSeq;
     this.latestFrames.set(runId, { ...frame, at: Date.now() });
+    if (frame.buffer) {
+      const recent = this.recentFrames.get(runId) ?? new Map<number, Buffer>();
+      recent.set(id, frame.buffer);
+      for (const old of [...recent.keys()].slice(0, Math.max(0, recent.size - 60))) recent.delete(old);
+      this.recentFrames.set(runId, recent);
+    }
+    return id;
   }
 
-  getFrame(runId: string): { url: string; viewport: string; action: string; buffer?: Buffer; at: number } | undefined {
-    return this.latestFrames.get(runId);
+  /** The latest frame, or (with `id`) that exact frame while it is still kept. */
+  getFrame(runId: string, id?: number): { url: string; viewport: string; action: string; buffer?: Buffer; at: number } | undefined {
+    const latest = this.latestFrames.get(runId);
+    if (id === undefined) return latest;
+    const buffer = this.recentFrames.get(runId)?.get(id);
+    return buffer ? { url: latest?.url ?? '', viewport: latest?.viewport ?? '', action: latest?.action ?? '', buffer, at: latest?.at ?? Date.now() } : undefined;
   }
 
   buildSimulation(runId: string) {

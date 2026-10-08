@@ -56,7 +56,8 @@ export interface ExecutorDeps {
 export interface ExecutorHooks {
   signal: AbortSignal;
   emit(type: ProgressEventType, message: string, data?: Record<string, unknown>): void;
-  setFrame?(frame: { url: string; viewport: string; action: string; buffer?: Buffer }): void;
+  /** Stores a live frame; returns its id so an event can name the exact screenshot its box was measured on. */
+  setFrame?(frame: { url: string; viewport: string; action: string; buffer?: Buffer }): number | void;
   snapshot: ProgressSnapshot;
   /** One-time token given with the URL. In memory only; never part of persisted run data. */
   auth?: AuthConfig;
@@ -77,6 +78,7 @@ export class RunExecutor {
   private run!: RunRecord;
   private config!: QAConfig;
   private request!: PersistedRunRequest;
+  private lastFrame: { id: number; target: string } | null = null;
   private state!: RunState;
   private controller?: BrowserController;
   private guard!: ActionGuard;
@@ -123,6 +125,7 @@ export class RunExecutor {
     viewport?: string,
     box?: (BoundingBox & { vpWidth?: number; vpHeight?: number }) | null,
     meta?: {
+      frameId?: number;
       phase?: ActionPhase;
       intent?: InferredIntent;
       verdict?: VerificationVerdict;
@@ -143,6 +146,7 @@ export class RunExecutor {
       target,
       detail,
       box,
+      frameId: meta?.frameId,
       phase: meta?.phase,
       intent: meta?.intent,
       verdict: meta?.verdict,
@@ -504,11 +508,16 @@ export class RunExecutor {
         controller: c, guard: this.guard, pageUrl: url, model: tested, config: cfg, budget: this.budget, testedLinks: this.testedLinks, plan, pageOnly: this.request.scope === 'page', workflow: this.workflowFor(url), registry: this.registry,
         onResult: (r) => this.recordResult(url, vp, r, needCapture),
         onAction: (a) => {
+          // The box is only meaningful on the screenshot taken with it. When the event carries its screenshot, the frame
+          // gets an id and the event names it, so the dashboard draws the overlay on exactly that image.
+          let frameId: number | undefined;
           if (a.buffer) {
-            this.hooks.setFrame?.({ url, viewport: vp.name, action: `${a.phase ? `[${a.phase}] ` : ''}${a.type} ${a.target}`, buffer: a.buffer });
-            this.hooks.emit('frame', `frame @ ${url} [${vp.name}]`, { url, viewport: vp.name, action: `${a.phase ? `[${a.phase}] ` : ''}${a.type} ${a.target}`, phase: a.phase, box: a.box });
+            const id = this.hooks.setFrame?.({ url, viewport: vp.name, action: `${a.phase ? `[${a.phase}] ` : ''}${a.type} ${a.target}`, buffer: a.buffer });
+            if (typeof id === 'number') { frameId = id; this.lastFrame = { id, target: a.target }; }
+            this.hooks.emit('frame', `frame @ ${url} [${vp.name}]`, { url, viewport: vp.name, action: `${a.phase ? `[${a.phase}] ` : ''}${a.type} ${a.target}`, phase: a.phase, box: a.box, frameId });
           }
           this.action('functional', a.type, a.target, a.ok, a.detail, url, vp.name, a.box, {
+            frameId,
             phase: a.phase,
             intent: a.intent,
             verdict: a.verdict,

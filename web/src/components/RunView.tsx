@@ -22,6 +22,7 @@ import {
   IconTerminal,
 } from './Icons';
 import { ReviewQueueWizard } from './ReviewQueueWizard';
+import { BugList } from './BugList';
 import { RunProgress } from './RunProgress';
 import { notify } from './Toast';
 import { emptyToken, toDirectAuth, TokenFields, type TokenState } from './TokenFields';
@@ -274,7 +275,7 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
   }
 
   return (
-    <div className="run-view-container">
+    <div className={`run-view-container ${active ? 'run-active' : ''}`}>
       {/* Evidence Lightbox Modal */}
       {activeEvidence && (
         <EvidenceModal
@@ -442,135 +443,27 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
           <strong>{run.state === 'ERROR' ? 'FAILED' : 'ABORTED'}</strong> {run.note}
         </div>
       )}
-      <ReadinessPanel pages={readiness} />
 
-      <section className="metrics-grid">
-        <div className="metric-card">
-          <span className="metric-label">Status</span>
-          <span className="metric-value">{active ? 'RUNNING' : run.state ?? run.status}</span>
-          <span className="metric-sub">{active ? 'Results are saved as each element is tested' : run.state === 'ABORTED' ? 'Stopped before finishing' : run.state === 'COMPLETED' ? 'Finished' : ''}</span>
+      {/* Run status and the numbers that matter, on one line */}
+      <section className="rs-summary" aria-label="Run summary">
+        <div className={`rs-stat rs-status rs-${(active ? 'RUNNING' : run.state ?? run.status).toLowerCase()}`}>
+          <b>{active ? 'RUNNING' : run.state ?? run.status}</b>
+          <span>{active ? 'results are saved as each element is tested' : run.state === 'ABORTED' ? 'stopped before finishing' : run.state === 'COMPLETED' ? 'finished' : 'status'}</span>
         </div>
-
-        <div className="metric-card">
-          <span className="metric-label">Pages</span>
-          <span className="metric-value">{counts ? `${counts.pagesTested}/${counts.pagesCrawled}` : '0'}</span>
-          <span className="metric-sub">tested / found</span>
+        <div className="rs-stat rs-bugs"><b>{uiCounts.bugs}</b><span>confirmed bugs</span></div>
+        <div className="rs-stat rs-pass"><b>{counts?.passed ?? 0}</b><span>passed</span></div>
+        <div className="rs-stat" title={`${counts?.inconclusive ?? 0} could not be verified · ${counts?.blocked ?? 0} skipped for safety · never counted as bugs`}>
+          <b>{(counts?.inconclusive ?? 0) + (counts?.blocked ?? 0)}</b><span>inconclusive / blocked</span>
         </div>
-
-        <div className="metric-card">
-          <span className="metric-label">Elements Tested</span>
-          <span className="metric-value metric-value-brand">{counts?.elementsTested ?? 0}</span>
-          <span className="metric-sub">buttons, links, controls, forms</span>
-        </div>
-
-        <div className="metric-card">
-          <span className="metric-label">Pass</span>
-          <span className="metric-value metric-value-success">{counts?.passed ?? 0}</span>
-          <span className="metric-sub">expected behaviour was observed</span>
-        </div>
-
-        <div className="metric-card">
-          <span className="metric-label">Inconclusive / Blocked</span>
-          <span className="metric-value">{(counts?.inconclusive ?? 0) + (counts?.blocked ?? 0)}</span>
-          <span className="metric-sub">{counts?.inconclusive ?? 0} could not be verified · {counts?.blocked ?? 0} skipped for safety · never counted as bugs</span>
-        </div>
-
-        <div className="metric-card">
-          <span className="metric-label">Confirmed Bugs</span>
-          <span className="metric-value metric-value-danger">{uiCounts.bugs}</span>
-          <span className="metric-sub">expected vs actual contradicted, with evidence</span>
-        </div>
-
+        <div className="rs-stat"><b>{counts?.elementsTested ?? 0}</b><span>elements tested</span></div>
+        <div className="rs-stat"><b>{counts ? `${counts.pagesTested}/${counts.pagesCrawled}` : '0'}</b><span>pages tested</span></div>
         {(active || run.state === 'ABORTED' || (counts?.notTestedPages ?? 0) + (counts?.notTestedElements ?? 0) > 0) && (
-          <div className="metric-card">
-            <span className="metric-label">Not Tested</span>
-            <span className="metric-value">{counts?.notTestedPages ?? 0}</span>
-            <span className="metric-sub">pages{(counts?.notTestedElements ?? 0) > 0 ? ` · ${counts?.notTestedElements} elements on started pages` : ''}</span>
+          <div className="rs-stat" title="Planned but not done: the run was stopped or a safety limit was reached">
+            <b>{counts?.notTestedPages ?? 0}</b><span>pages not tested{(counts?.notTestedElements ?? 0) > 0 ? ` · ${counts?.notTestedElements} elements` : ''}</span>
           </div>
         )}
       </section>
-
-
-      {/* Severity Breakdown Bar */}
-      {uiFindings.length > 0 && (
-        <div className="visual-distribution-card">
-          <div className="dist-header">
-            <span className="dist-title">Findings Severity Distribution</span>
-            <div className="dist-legend">
-              <span className="legend-item"><span className="legend-dot bg-critical" /> Critical ({severityCounts.critical})</span>
-              <span className="legend-item"><span className="legend-dot bg-major" /> Major ({severityCounts.major})</span>
-              <span className="legend-item"><span className="legend-dot bg-minor" /> Minor ({severityCounts.minor})</span>
-              <span className="legend-item"><span className="legend-dot bg-info" /> Info ({severityCounts.info})</span>
-            </div>
-          </div>
-          <div className="distribution-bar-track">
-            {severityCounts.critical > 0 && (
-              <div
-                className="dist-segment bg-critical"
-                style={{ width: `${(severityCounts.critical / uiFindings.length) * 100}%` }}
-                title={`Critical: ${severityCounts.critical}`}
-              />
-            )}
-            {severityCounts.major > 0 && (
-              <div
-                className="dist-segment bg-major"
-                style={{ width: `${(severityCounts.major / uiFindings.length) * 100}%` }}
-                title={`Major: ${severityCounts.major}`}
-              />
-            )}
-            {severityCounts.minor > 0 && (
-              <div
-                className="dist-segment bg-minor"
-                style={{ width: `${(severityCounts.minor / uiFindings.length) * 100}%` }}
-                title={`Minor: ${severityCounts.minor}`}
-              />
-            )}
-            {severityCounts.info > 0 && (
-              <div
-                className="dist-segment bg-info"
-                style={{ width: `${(severityCounts.info / uiFindings.length) * 100}%` }}
-                title={`Info: ${severityCounts.info}`}
-              />
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Interactive Category Filter Cards */}
-      <section className="categories-section">
-        <div className="categories-header">
-          <h3 className="categories-title">Confirmed Bugs by Category</h3>
-          <span className="categories-subtitle">Click a category card to quickly filter the findings below</span>
-        </div>
-
-        <div className="category-cards-grid">
-          {allCategories.map((catKey) => {
-            const count = categoryCounts[catKey] || 0;
-            const meta = CATEGORY_META[catKey] || { label: catKey, icon: '🔍', desc: 'Category findings' };
-            const isSelected = categoryFilter === catKey;
-
-            return (
-              <button
-                key={catKey}
-                type="button"
-                className={`category-summary-card ${isSelected ? 'cat-card-selected' : ''}`}
-                onClick={() => {
-                  if (catKey === 'accessibility') { setTab('accessibility'); return; }
-                  setTab('findings');
-                  setCategoryFilter(isSelected ? 'all' : catKey);
-                }}
-              >
-                <div className="cat-card-top">
-                  <span className="cat-icon">{meta.icon}</span>
-                  <span className={`cat-count-badge ${count > 0 ? 'count-active' : ''}`}>{count}</span>
-                </div>
-                <div className="cat-card-name">{meta.label}</div>
-                <div className="cat-card-desc">{meta.desc}</div>
-              </button>
-            );
-          })}
-        </div>
-      </section>
+      <ReadinessPanel pages={readiness} />
 
       {/* Main Tabs Navigation */}
       <div className="main-tabs-bar">
@@ -581,7 +474,7 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
         >
           <IconLayers style={{ width: 15, height: 15 }} />
           <span>Confirmed Bugs</span>
-          <span className="tab-counter-badge">{uiFindings.length}</span>
+          <span className="tab-counter-badge">{uiCounts.bugs}</span>
         </button>
 
         {showA11y && (
@@ -608,17 +501,17 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
           </button>
         )}
 
-        <button
+        {(queue.length > 0 || tab === 'review') && <button
           type="button"
           className={`main-tab-item ${tab === 'review' ? 'main-tab-active' : ''}`}
           onClick={() => setTab('review')}
         >
           <IconShield style={{ width: 15, height: 15 }} />
-          <span>Review Queue</span>
+          <span>Review queue</span>
           <span className={`tab-counter-badge ${queue.length > 0 ? 'badge-review-alert' : ''}`}>
             {queue.length}
           </span>
-        </button>
+        </button>}
 
         <button
           type="button"
@@ -626,7 +519,7 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
           onClick={() => setTab('activity')}
         >
           <IconTerminal style={{ width: 15, height: 15 }} />
-          <span>Activity Stream</span>
+          <span>Activity</span>
           {events.length > 0 && <span className="tab-counter-badge">{events.length}</span>}
         </button>
       </div>
@@ -733,47 +626,12 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
               )}
             </div>
 
-            <div className="results-count-banner" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
-              <div>
-                Showing <strong>{filteredFindings.length}</strong> of <strong>{uiFindings.length}</strong> UI/UX findings
-                {viewMode === 'grouped' && ` (${groupedFindings.length} distinct problems)`}
-              </div>
-
-              <div className="view-mode-toggle">
-                <button
-                  type="button"
-                  className={`view-mode-btn ${viewMode === 'grouped' ? 'active' : ''}`}
-                  onClick={() => setViewMode('grouped')}
-                  title="Group repeated issues by rule type"
-                >
-                  📁 Group by Issue Type ({groupedFindings.length})
-                </button>
-                <button
-                  type="button"
-                  className={`view-mode-btn ${viewMode === 'flat' ? 'active' : ''}`}
-                  onClick={() => setViewMode('flat')}
-                  title="Show all individual finding logs"
-                >
-                  📄 All Finding Cards ({filteredFindings.length})
-                </button>
-              </div>
+            <div className="results-count-banner">
+              {filteredFindings.length === uiFindings.length
+                ? <>{groupedFindings.length} confirmed bug{groupedFindings.length === 1 ? '' : 's'}{uiFindings.length !== groupedFindings.length ? ` (${uiFindings.length} instances)` : ''}</>
+                : <>Showing {groupedFindings.length} bug{groupedFindings.length === 1 ? '' : 's'} ({filteredFindings.length} of {uiFindings.length} instances match the filters)</>}
             </div>
           </div>
-
-          {observations.length > 0 && (
-            <details className="observations-box">
-              <summary>
-                {observations.length} observation(s) were recorded and are <strong>not bugs</strong>: they did not pass the finding gate (no contradiction of an expected behaviour, no proof a user sees a problem, or the page had not loaded all its data).
-              </summary>
-              <ul>
-                {observations.slice(0, 40).map(({ f, n }) => (
-                  <li key={f.id}>
-                    <span className="result-class rc-INCONCLUSIVE">inconclusive</span> <code>{f.ruleId}</code>{n > 1 ? ` ×${n}` : ''}: {f.actual.slice(0, 220)}
-                  </li>
-                ))}
-              </ul>
-            </details>
-          )}
 
           {/* Findings List */}
           {uiFindings.length === 0 && (run?.status === 'ERROR' || (run?.status === 'ABORTED' && (run.summary?.pages ?? 0) === 0)) ? (
@@ -800,77 +658,33 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
                   : 'Try clearing your search query or broadening your filters.'}
               </p>
             </div>
-          ) : viewMode === 'grouped' ? (
-            <div className="findings-grouped-stream">
-              {groupedFindings.map((group) => {
-                const isExpanded = !!expandedRules[group.ruleId];
-                return (
-                  <div key={group.ruleId} className="rule-group-card">
-                    <div className="rule-group-header" onClick={() => toggleRuleExpand(group.ruleId)}>
-                      <div className="rule-group-title-row">
-                        <div className="rule-group-badges">
-                          <span className={`severity-badge s-${group.severity}`}>
-                            {group.severity.toUpperCase()}
-                          </span>
-                          <span className="badge badge-neutral" style={{ textTransform: 'capitalize' }}>
-                            {group.category}
-                          </span>
-                          <span className="rule-group-id">{group.ruleId}</span>
-                        </div>
-                        <div className="rule-group-meta">
-                          <span className="rule-count-pill">
-                            {group.findings.length} {group.findings.length === 1 ? 'occurrence' : 'occurrences'}
-                            {group.uniqueElements > 1 && ` (${group.uniqueElements} elements)`}
-                          </span>
-                          <div className="viewport-pills-row">
-                            {Array.from(group.viewports).map((vp) => (
-                              <span key={vp} className="vp-pill">@{vp}</span>
-                            ))}
-                          </div>
-                          <button
-                            type="button"
-                            className="btn-toggle-expand"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              toggleRuleExpand(group.ruleId);
-                            }}
-                          >
-                            {isExpanded ? 'Collapse ▲' : `View ${group.findings.length} instances ▼`}
-                          </button>
-                        </div>
-                      </div>
-                      <div className="rule-group-desc">{group.expected}</div>
-                    </div>
-
-                    {isExpanded && (
-                      <div className="rule-group-instances">
-                        {group.findings.map((f) => (
-                          <FindingCard
-                            key={f.id}
-                            finding={f}
-                            onDecide={(d, note) => act(() => api.decide(f.id, d, note), `Decision saved: ${d}`)}
-                            onApproveBaseline={(p, v) => act(() => api.approveBaseline(runId, p, v), 'Baseline approved')}
-                            onViewEvidence={(item, meta) => setActiveEvidence({ item, meta })}
-                          />
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
           ) : (
-            <div className="findings-stream">
-              {filteredFindings.map((f) => (
+            <BugList
+              groups={groupedFindings}
+              renderInstance={(f, first) => (
                 <FindingCard
                   key={f.id}
                   finding={f}
+                  defaultExpanded={first}
                   onDecide={(d, note) => act(() => api.decide(f.id, d, note), `Decision saved: ${d}`)}
                   onApproveBaseline={(p, v) => act(() => api.approveBaseline(runId, p, v), 'Baseline approved')}
                   onViewEvidence={(item, meta) => setActiveEvidence({ item, meta })}
                 />
-              ))}
-            </div>
+              )}
+            />
+          )}
+
+          {observations.length > 0 && (
+            <details className="observations-box">
+              <summary>{observations.length} observation(s) recorded that are <strong>not bugs</strong> (they did not pass the finding gate)</summary>
+              <ul>
+                {observations.slice(0, 40).map(({ f, n }) => (
+                  <li key={f.id}>
+                    <span className="result-class rc-INCONCLUSIVE">inconclusive</span> <code>{f.ruleId}</code>{n > 1 ? ` ×${n}` : ''}: {f.actual.slice(0, 220)}
+                  </li>
+                ))}
+              </ul>
+            </details>
           )}
         </div>
       )}

@@ -202,7 +202,18 @@ export function createApiServer(platform: Platform, opts: ApiOptions = {}): http
         return send(res, 200, { simulation: orch.buildSimulation(runId) });
       }
       if (sub === 'live-preview' && m === 'GET') {
-        const frame = orch.getFrame(runId);
+        // ?frame=<id>: exactly the screenshot an overlay box was measured on (kept for the last few frames); otherwise the latest
+        const wanted = Number(url.searchParams.get('frame'));
+        const exact = Number.isInteger(wanted) && wanted > 0;
+        const frame = exact ? orch.getFrame(runId, wanted) : orch.getFrame(runId);
+        // a named frame never changes, so the browser may keep it; one that is no longer kept is "gone", never another image
+        if (exact && !frame?.buffer) { res.writeHead(404, { 'cache-control': 'no-store' }); res.end(); return; }
+        if (frame?.buffer && exact) {
+          const type = frame.buffer[0] === 0x89 && frame.buffer[1] === 0x50 ? 'image/png' : 'image/jpeg';
+          res.writeHead(200, { 'content-type': type, 'cache-control': 'private, max-age=600, immutable', 'content-length': frame.buffer.length });
+          res.end(frame.buffer);
+          return;
+        }
         if (frame?.buffer) {
           const contentType = frame.buffer[0] === 0x89 && frame.buffer[1] === 0x50 ? 'image/png' : 'image/jpeg';
           res.writeHead(200, { 'content-type': contentType, 'cache-control': 'no-cache, no-store, must-revalidate', 'content-length': frame.buffer.length });
