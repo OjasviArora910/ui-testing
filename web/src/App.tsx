@@ -14,12 +14,14 @@ import { RunList } from './components/RunList';
 import { RunView } from './components/RunView';
 import { ToastContainer } from './components/Toast';
 
+type AppScreen = 'new' | 'live' | 'results';
+
 export function App() {
   const [config, setConfig] = useState<PlatformConfig | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [sidebarTab, setSidebarTab] = useState<'new' | 'history'>('new');
+  const [screen, setScreen] = useState<AppScreen>('new');
 
   const refreshRuns = useCallback(() => {
     api
@@ -41,6 +43,13 @@ export function App() {
   }, [runs, selected]);
 
   const activeRunCount = runs.filter((r) => r.active).length;
+  const selectedRun = runs.find((r) => r.id === selected) ?? null;
+
+  useEffect(() => {
+    if (screen === 'new' && selectedRun?.active) {
+      setScreen('live');
+    }
+  }, [screen, selectedRun?.active]);
 
   return (
     <div className="app-shell">
@@ -63,19 +72,29 @@ export function App() {
           <nav className="navbar-links" aria-label="Main Navigation">
             <button
               type="button"
-              className={`nav-link-btn ${sidebarTab === 'new' ? 'nav-link-active' : ''}`}
-              onClick={() => setSidebarTab('new')}
+              className={`nav-link-btn ${screen === 'new' ? 'nav-link-active' : ''}`}
+              onClick={() => setScreen('new')}
             >
               <IconPlay style={{ width: 14, height: 14 }} />
               <span>New Test</span>
             </button>
             <button
               type="button"
-              className={`nav-link-btn ${sidebarTab === 'history' ? 'nav-link-active' : ''}`}
-              onClick={() => setSidebarTab('history')}
+              className={`nav-link-btn ${screen === 'live' ? 'nav-link-active' : ''}`}
+              onClick={() => setScreen('live')}
+              disabled={!selected}
+            >
+              <span className="live-dot" />
+              <span>Live Execution</span>
+            </button>
+            <button
+              type="button"
+              className={`nav-link-btn ${screen === 'results' ? 'nav-link-active' : ''}`}
+              onClick={() => setScreen('results')}
+              disabled={runs.length === 0}
             >
               <IconLayers style={{ width: 14, height: 14 }} />
-              <span>Test Runs</span>
+              <span>Results Dashboard</span>
               {runs.length > 0 && <span className="nav-badge">{runs.length}</span>}
             </button>
             <a
@@ -137,89 +156,91 @@ export function App() {
         </div>
       )}
 
-      {/* Main SaaS Workspace Layout */}
-      <div className="app-workspace">
-        <aside className="workspace-sidebar">
-          {/* Sidebar Tab Toggle for Mobile/Tablet or quick switching */}
-          <div className="sidebar-tab-switcher">
-            <button
-              type="button"
-              className={`sidebar-tab-btn ${sidebarTab === 'new' ? 'active' : ''}`}
-              onClick={() => setSidebarTab('new')}
-            >
-              New Test Config
-            </button>
-            <button
-              type="button"
-              className={`sidebar-tab-btn ${sidebarTab === 'history' ? 'active' : ''}`}
-              onClick={() => setSidebarTab('history')}
-            >
-              History ({runs.length})
-            </button>
-          </div>
+      <div className={`app-workspace app-screen-${screen}`}>
+        {screen === 'new' && (
+          <main className="workspace-main new-test-main">
+            {config ? (
+              <div className="new-test-panel animated-reveal">
+                <RunForm
+                  config={config}
+                  onStarted={(id) => {
+                    setSelected(id);
+                    setScreen('live');
+                    refreshRuns();
+                  }}
+                />
+              </div>
+            ) : (
+              <div className="loading-state-wrapper">
+                <div className="spinner-lg" />
+                <p className="loading-text">Loading platform configuration...</p>
+              </div>
+            )}
+          </main>
+        )}
 
-          {sidebarTab === 'new' && config && (
-            <div className="sidebar-card-wrap animated-reveal">
-              <RunForm
-                config={config}
-                onStarted={(id) => {
-                  setSelected(id);
-                  refreshRuns();
-                }}
+        {screen === 'live' && (
+          <main className="workspace-main live-test-main">
+            {selected ? (
+              <RunView
+                key={selected}
+                runId={selected}
+                mode="live"
+                onChange={refreshRuns}
+                onViewResults={() => setScreen('results')}
               />
-            </div>
-          )}
+            ) : (
+              <div className="welcome-empty-state">
+                <div className="welcome-icon-box">
+                  <IconShield style={{ width: 44, height: 44 }} />
+                </div>
+                <h2 className="welcome-title">No active run selected</h2>
+                <p className="welcome-subtitle">Start a new test to watch live execution here.</p>
+                <div className="welcome-actions">
+                  <button type="button" className="btn btn-primary" onClick={() => setScreen('new')}>
+                    <IconPlay style={{ width: 14, height: 14 }} />
+                    New Test
+                  </button>
+                </div>
+              </div>
+            )}
+          </main>
+        )}
 
-          {sidebarTab === 'history' && (
-            <div className="sidebar-card-wrap animated-reveal">
+        {screen === 'results' && (
+          <>
+            <aside className="workspace-sidebar results-sidebar">
               <RunList
                 runs={runs}
                 selected={selected}
-                onSelect={(id) => setSelected(id)}
+                onSelect={(id) => {
+                  setSelected(id);
+                  setScreen('results');
+                }}
                 onRefresh={refreshRuns}
               />
-            </div>
-          )}
-
-          {/* Desktop persistent secondary history panel if on new tab */}
-          {sidebarTab === 'new' && runs.length > 0 && (
-            <div className="desktop-history-preview">
-              <RunList
-                runs={runs.slice(0, 5)}
-                selected={selected}
-                onSelect={(id) => setSelected(id)}
-                onRefresh={refreshRuns}
-              />
-            </div>
-          )}
-        </aside>
-
-        <main className="workspace-main">
-          {selected ? (
-            <RunView key={selected} runId={selected} onChange={refreshRuns} />
-          ) : (
-            <div className="welcome-empty-state">
-              <div className="welcome-icon-box">
-                <IconShield style={{ width: 44, height: 44 }} />
-              </div>
-              <h2 className="welcome-title">Autonomous UI/UX QA Platform</h2>
-              <p className="welcome-subtitle">
-                Enter your web application URL on the left panel, pick your viewports, and launch an autonomous test to
-                discover layout regressions, accessibility flaws, and functional bugs.
-              </p>
-              <div className="welcome-actions">
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  onClick={() => setSidebarTab('new')}
-                >
-                  <IconPlay style={{ width: 14, height: 14 }} />
-                  Start a Test Run
-                </button>
-              </div>
-            </div>
-          )}
-        </main>
+            </aside>
+            <main className="workspace-main results-main">
+              {selectedRun ? (
+                <RunView key={selectedRun.id} runId={selectedRun.id} mode="results" onChange={refreshRuns} />
+              ) : (
+                <div className="welcome-empty-state">
+                  <div className="welcome-icon-box">
+                    <IconShield style={{ width: 44, height: 44 }} />
+                  </div>
+                  <h2 className="welcome-title">No completed run selected</h2>
+                  <p className="welcome-subtitle">Completed and historical runs will appear in this dashboard.</p>
+                  <div className="welcome-actions">
+                    <button type="button" className="btn btn-primary" onClick={() => setScreen('new')}>
+                      <IconPlay style={{ width: 14, height: 14 }} />
+                      Start a Test Run
+                    </button>
+                  </div>
+                </div>
+              )}
+            </main>
+          </>
+        )}
       </div>
     </div>
   );

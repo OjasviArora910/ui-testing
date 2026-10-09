@@ -67,6 +67,8 @@ export function RunProgress({ runId, snapshot: s, status, url, startTime, events
   const latestUrl = (): string => `/api/runs/${runId}/live-preview?t=${Date.now()}`;
 
   const [elapsed, setElapsed] = useState(0);
+  const [previewMode, setPreviewMode] = useState<'fit' | 'actual'>('fit');
+  const [previewExpanded, setPreviewExpanded] = useState(false);
   const [wantedUrl, setWantedUrl] = useState<string>(latestUrl);
   const [shownUrl, setShownUrl] = useState<string>(latestUrl);
   const [overlay, setOverlay] = useState<Overlay | null>(null);
@@ -229,7 +231,7 @@ export function RunProgress({ runId, snapshot: s, status, url, startTime, events
   const stageIndex = current?.stage ? STAGES.indexOf(current.stage) : -1;
 
   return (
-    <div className="rp">
+    <div className={`rp ${previewExpanded ? 'rp-expanded' : ''}`}>
       {/* Fixed summary: always visible, one line */}
       <div className="rp-summary">
         <div className="rp-summary-left">
@@ -249,8 +251,29 @@ export function RunProgress({ runId, snapshot: s, status, url, startTime, events
       <div className="rp-body">
         {/* The live browser: large, and it stays in view */}
         <div className="rp-stage-col">
-          <div className="rp-urlbar" title={s?.currentPage || url}>{s?.currentPage || url}</div>
-          <div className="live-simulation-stage">
+          <div className="rp-urlbar">
+            <span className="rp-urlbar-text" title={s?.currentPage || url}>{s?.currentPage || url}</span>
+            <div className="rp-preview-controls" aria-label="Preview size controls">
+              <button
+                type="button"
+                className={previewMode === 'fit' ? 'active' : ''}
+                onClick={() => setPreviewMode('fit')}
+              >
+                Fit to View
+              </button>
+              <button
+                type="button"
+                className={previewMode === 'actual' ? 'active' : ''}
+                onClick={() => setPreviewMode('actual')}
+              >
+                Actual Size
+              </button>
+              <button type="button" onClick={() => setPreviewExpanded((v) => !v)}>
+                {previewExpanded ? 'Normal' : 'Expand'}
+              </button>
+            </div>
+          </div>
+          <div className={`live-simulation-stage preview-${previewMode}`}>
             <img ref={imgRef} className="live-shot" alt="Current browser view" src={shownUrl} onLoad={() => setLayoutTick((n) => n + 1)} />
             {activeBox && (
               <div className={`sim-target-box ${activeBox.kind}`} style={{ left: `${activeBox.left}px`, top: `${activeBox.top}px`, width: `${activeBox.width}px`, height: `${activeBox.height}px` }}>

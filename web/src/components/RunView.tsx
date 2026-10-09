@@ -42,7 +42,17 @@ const CATEGORY_META: Record<string, { label: string; icon: string; desc: string 
   performance: { label: 'Performance', icon: '⏱️', desc: 'Slow requests & rendering bottlenecks' },
 };
 
-export function RunView({ runId, onChange }: { runId: string; onChange: () => void }) {
+export function RunView({
+  runId,
+  onChange,
+  mode = 'results',
+  onViewResults,
+}: {
+  runId: string;
+  onChange: () => void;
+  mode?: 'live' | 'results';
+  onViewResults?: () => void;
+}) {
   const [run, setRun] = useState<Run | null>(null);
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [events, setEvents] = useState<ProgressEvent[]>([]);
@@ -275,7 +285,7 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
   }
 
   return (
-    <div className={`run-view-container ${active ? 'run-active' : ''}`}>
+    <div className={`run-view-container run-mode-${mode} ${active ? 'run-active' : ''}`}>
       {/* Evidence Lightbox Modal */}
       {activeEvidence && (
         <EvidenceModal
@@ -444,6 +454,20 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
         </div>
       )}
 
+      {mode === 'live' && !active && (
+        <div className="live-complete-state">
+          <div>
+            <h2>Run finished</h2>
+            <p>The live execution is complete. Open the results dashboard to inspect findings and evidence.</p>
+          </div>
+          <button type="button" className="btn btn-primary" onClick={onViewResults}>
+            View Results
+          </button>
+        </div>
+      )}
+
+      {mode === 'results' && (
+      <>
       {/* Run status and the numbers that matter, on one line */}
       <section className="rs-summary" aria-label="Run summary">
         <div className={`rs-stat rs-status rs-${(active ? 'RUNNING' : run.state ?? run.status).toLowerCase()}`}>
@@ -463,7 +487,9 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
           </div>
         )}
       </section>
-      <ReadinessPanel pages={readiness} />
+      <details className="advanced-test-details readiness-details">
+        <summary>Advanced Test Details</summary>
+        <ReadinessPanel pages={readiness} />
 
       {/* Main Tabs Navigation */}
       <div className="main-tabs-bar">
@@ -523,6 +549,7 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
           {events.length > 0 && <span className="tab-counter-badge">{events.length}</span>}
         </button>
       </div>
+      </details>
 
       {/* TAB 1: ALL FINDINGS */}
       {tab === 'findings' && (
@@ -769,6 +796,8 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
             </div>
           </div>
         </div>
+      )}
+      </>
       )}
     </div>
   );

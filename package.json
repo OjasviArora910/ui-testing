@@ -10,6 +10,7 @@
     "serve": "node --env-file-if-exists=.env --import tsx src/cli.ts serve",
     "demo": "node --env-file-if-exists=.env --import tsx src/cli.ts demo",
     "dev:web": "vite web",
+    "test:wizard": "node scripts/check-wizard-navigation.mjs",
     "web:build": "vite build web",
     "start": "npm run web:build && npm run serve"
   },
