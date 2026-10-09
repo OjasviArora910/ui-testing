@@ -192,7 +192,21 @@ function decideBehaviour(input: VerifyInput, evidence: Evidence): VerificationOu
   const popups = observation.popups ?? [];
   const anyChange = observedChange(observation);
 
-  // 5.0 A native dialog or a popup window is a complete, observable response whatever the control was guessed to be.
+  // 5.0a The application ASKED (native confirm / prompt). The platform always cancels such a dialog, because accepting
+  // it could authorize a sensitive or destructive operation. The intended action therefore did not happen and cannot be
+  // judged: never a pass.
+  const asked = jsDialogs.find((d) => /^(confirm|prompt)\b/.test(d));
+  if (asked) {
+    const kind = asked.split(':')[0]!; const message = asked.split(': ').slice(1).join(': ').slice(0, 120);
+    return {
+      verdict: 'NEEDS_REVIEW', confidence: 'LOW', check: 'native-dialog-cancelled',
+      expected: expectedOutcome.description,
+      actual: `"${elementLabel}" asked for confirmation with a native ${kind} dialog ("${message}"). It was safely cancelled (never accepted), so the intended action was not performed and is not verified`,
+      reason: 'A confirmation was requested and cancelled for safety; the outcome of the action is unknown', evidence,
+    };
+  }
+
+  // 5.0 A native alert or a popup window is a complete, observable response whatever the control was guessed to be.
   if (jsDialogs.length > 0 || popups.length > 0) {
     const what = jsDialogs.length > 0 ? `a native ${jsDialogs[0]!.split(':')[0]} dialog ("${jsDialogs[0]!.split(': ').slice(1).join(': ').slice(0, 80)}")` : `a popup window (${popups[0] || 'about:blank'})`;
     return {

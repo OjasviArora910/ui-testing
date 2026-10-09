@@ -28,12 +28,12 @@ function startSite(): Promise<{ server: http.Server; url: string; hits: Record<s
       return;
     }
     res.setHeader('content-type', 'text/html');
-    res.end(`<!doctype html><html lang="en"><head><title>Roles</title><style>body{font-family:sans-serif;margin:24px}#wiz{display:none;border:1px solid #999;padding:16px;margin:16px 0}.step{display:none}.step.on{display:block}
+    res.end(`<!doctype html><html lang="en"><head><title>Records</title><style>body{font-family:sans-serif;margin:24px}#wiz{display:none;border:1px solid #999;padding:16px;margin:16px 0}.step{display:none}.step.on{display:block}
 ol.wizard-steps{list-style:none;display:flex;gap:16px;padding:0}ol.wizard-steps li.active a{font-weight:bold}label{display:block;margin:8px 0}td{border:1px solid #ccc;padding:4px 10px}</style></head><body>
-<main><h1>Roles</h1>
+<main><h1>Records</h1>
 <a id="create" href="#">C r e a t e</a>
-<div id="wiz"><h2>Create role</h2>
-  <ol class="wizard-steps"><li class="active"><a href="#" data-step="0">Info</a></li><li><a href="#" data-step="1">Permissions</a></li><li><a href="#" data-step="2">Assignment</a></li></ol>
+<div id="wiz"><h2>Create record</h2>
+  <ol class="wizard-steps"><li class="active"><a href="#" data-step="0">Info</a></li><li><a href="#" data-step="1">Options</a></li><li><a href="#" data-step="2">Assignment</a></li></ol>
   <div class="step on"><label>Name * <input type="text" id="rname"></label><label>Description <textarea id="rdesc"></textarea></label><p id="msg" role="alert"></p></div>
   <div class="step"><label>Contacts access <input type="range" id="perm" min="0" max="4" value="2"></label><label><input type="checkbox" id="reports" checked> Reports</label></div>
   <div class="step"><label><input type="checkbox" id="assign"> All users group</label><button type="button" id="save">Save</button> <button type="button" id="del">Delete</button></div>
@@ -104,7 +104,7 @@ describe('creation wizard: traversed, explored step by step, committed once (bro
     // forward and back through the wizard, each verified by the step that is shown
     expect(of('wizard-next').map((x) => x.classification), r.say).toEqual(['EXPECTED', 'EXPECTED']);
     expect(of('wizard-back').map((x) => x.classification), r.say).toEqual(['EXPECTED', 'EXPECTED']);
-    expect(of('wizard-next')[0]!.actual).toMatch(/led from step 1 to another step: .*active: Permissions/);
+    expect(of('wizard-next')[0]!.actual).toMatch(/led from step 1 to another step: .*active: Options/);
     expect(of('wizard-next')[1]!.actual).toMatch(/led from step 2 to another step: .*active: Assignment/);
     // the controls of every step were found on that step, tested and restored exactly
     for (const label of [/Reports/, /All users group/, /Description/]) {

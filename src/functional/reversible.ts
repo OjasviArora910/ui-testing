@@ -1,3 +1,4 @@
+import { CONTEXT_JS, inspectDialog, resolveUnexpectedDialog } from './sensitive.js';
 import type { BrowserController } from '../browser/index.js';
 import { shellAmong } from '../discovery/shell.js';
 import type { FunctionalContext, FunctionalResult } from './types.js';
@@ -20,7 +21,7 @@ const MAX_PER_PAGE = 150;
 const NEVER = /\b(lock(ed)?[\s-]?out|lockout|suspend|revoke|deactivate|terminate|ban(ned)?|block (user|account|access)|disable (user|account|login|access))\b/i;
 
 type Kind = 'toggle' | 'slider' | 'select' | 'tab' | 'text';
-interface Found { id: number; kind: Kind; label: string; path: string; native: boolean; type: string }
+interface Found { id: number; kind: Kind; label: string; path: string; native: boolean; type: string; context: string; heading: string; purpose: string }
 interface State { value: string; exists: boolean }
 
 const COMMON = `
@@ -37,6 +38,7 @@ const DISCOVER_SCRIPT = `((mark, onlyNew, max) => {
   if (onlyNew && !seen) return [];
   document.querySelectorAll('[' + mark + ']').forEach((e) => e.removeAttribute(mark));
   const text = (e) => (e ? (e.innerText || e.textContent || '') : '').replace(/\\s+/g, ' ').trim();
+  ${CONTEXT_JS}
   const labelOf = (el) => {
     const aria = el.getAttribute('aria-label'); if (aria) return aria;
     const by = el.getAttribute('aria-labelledby'); if (by) { const t = by.split(/\\s+/).map((i) => text(document.getElementById(i))).join(' ').trim(); if (t) return t; }
@@ -73,7 +75,7 @@ const DISCOVER_SCRIPT = `((mark, onlyNew, max) => {
     if (!visible(el) || (onlyNew && (seen.has(el) || (window.__qaTestedControls && window.__qaTestedControls.has(el))))) continue;
     const k = kindOf(el); if (!k) continue;
     el.setAttribute(mark, String(out.length));
-    out.push({ id: out.length, kind: k[0], native: k[1], label: labelOf(el).slice(0, 120), path: pathOf(el), type: (el.getAttribute('type') || el.tagName).toLowerCase() });
+    out.push({ id: out.length, kind: k[0], native: k[1], label: labelOf(el).slice(0, 120), path: pathOf(el), type: (el.getAttribute('type') || el.tagName).toLowerCase(), ...contextOf(el) });
   }
   return out;
 })`;
@@ -241,7 +243,7 @@ export async function testReversibleControls(
     // Configuration controls (check/select/fill/press) carry DATA labels — the permission name, not an action command.
     // "Send Publish Copy" is a permission name, not a command to publish. ActionGuard correctly allows these.
     const guardKind = f.kind === 'toggle' ? 'check' : f.kind === 'select' ? 'select' : f.kind === 'text' ? 'fill' : f.kind === 'slider' ? 'press' : 'click';
-    const decision = NEVER.test(label) ? { allowed: false, reason: 'controls that take access away are never operated' } : guard.check({ kind: guardKind, name: label, text: label, fieldName: label, fieldType: f.type });
+    const decision = NEVER.test(label) ? { allowed: false, reason: 'controls that take access away are never operated' } : guard.check({ kind: guardKind, name: label, text: label, fieldName: label, fieldType: f.type, context: f.context, heading: f.heading, purpose: f.purpose });
     if (!decision.allowed) {
       push({ ...BASE, check: 'guard', status: 'skipped', severity: 'info', basis: null, element: ref, expected: 'Safe, reversible controls are exercised', actual: `Not used: ${decision.reason}`, details: { guard: decision } });
       continue;
@@ -249,6 +251,8 @@ export async function testReversibleControls(
     const before = await read(f);
     if (!before.exists) continue;
     if (!ctx.budget.consume()) break;
+    const dialogBefore = (await inspectDialog(c))?.key ?? null;
+    const nativeBefore = c.jsDialogs.length;
     const urlBefore = c.page.url();
     const target = { css: css(f) };
     let error: string | undefined;
@@ -347,6 +351,20 @@ export async function testReversibleControls(
       const value = f.type === 'number' ? (before.value === '1' ? '2' : '1') : f.type === 'email' ? 'john@maildrop.cc' : f.type === 'tel' ? '5550100' : f.type === 'url' ? 'https://example.com' : before.value === 'test' ? 'test 2' : 'test';
       error = (await c.fill(target, value)).error;
       await c.settle(80); changed = await read(f);
+    }
+    // The application answered with a warning / confirmation / security dialog: identified first, then dismissed only
+    // through its negative control (never an affirmative one). The interaction is not judged, and this state is left.
+    const surprise = await resolveUnexpectedDialog(ctx, dialogBefore);
+    const asked = c.jsDialogs.slice(nativeBefore).find((d) => d.type === 'confirm' || d.type === 'prompt' || d.type === 'beforeunload');
+    if (surprise || asked) {
+      const what = surprise
+        ? `an unexpected ${surprise.dialog.type} dialog appeared ("${surprise.dialog.text.slice(0, 120)}"; buttons: ${surprise.dialog.buttons.join(', ') || 'none'}); ${surprise.how}`
+        : `the application asked for confirmation with a native ${asked!.type} dialog ("${asked!.message.slice(0, 120)}"); it was cancelled, never accepted`;
+      push({ ...BASE, check: 'unexpected-dialog', status: 'inconclusive', severity: 'info', basis: null, element: ref, expected, confidence: 'LOW',
+        actual: `After trying to ${how} "${label}", ${what}. Nothing was confirmed. The remaining controls of this view are not operated; the page is reloaded before the next test`,
+        screenshot: await c.page.screenshot({ type: 'jpeg', quality: 60 }).catch(() => undefined) });
+      done++;
+      break;
     }
     const responded = !error && changed.exists && changed.value !== before.value;
 

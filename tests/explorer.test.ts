@@ -28,17 +28,17 @@ describe('generic UI state exploration (browser)', () => {
       if (u.pathname === '/did') { const k = u.searchParams.get('c')!; (log[k] ??= []).push(u.searchParams.get('v') ?? ''); res.end('ok'); return; }
       if (u.pathname.startsWith('/api/')) { res.setHeader('content-type', 'application/json'); res.end('{"ok":true}'); return; }
       res.setHeader('content-type', 'text/html');
-      res.end(`<!doctype html><html lang="en"><head><title>Roles</title>
+      res.end(`<!doctype html><html lang="en"><head><title>Records</title>
 <style>body{font-family:sans-serif;margin:24px}td,th{border:1px solid #ccc;padding:6px 10px}td[data-action]{cursor:pointer}
 #editor{display:none;border:1px solid #999;padding:16px;margin-top:16px}.pane{display:none;padding:12px}.pane.active{display:block}
 ul.tabs{list-style:none;display:flex;gap:12px;padding:0}ul.tabs li.active a{font-weight:bold}.menu{display:none;border:1px solid #aaa;padding:6px}label{display:block;margin:6px 0}</style></head><body>
-<main><h1>Roles</h1>
+<main><h1>Records</h1>
 <table id="roles">
   <tr><th>Name</th><th>Status</th></tr>
   <tr><td data-action="view">Delete old sales</td><td data-action="view">Unlocked</td></tr>
   <tr><td data-action="view">Partner admin</td><td data-action="view">Unlocked</td></tr>
 </table>
-<div id="editor"><h2>Role editor</h2>
+<div id="editor"><h2>Record editor</h2>
   <ul class="tabs" id="maintabs">
     <li class="active"><a href="#p1" data-pane="p1">Getting started</a></li>
     <li><a href="#p2" data-pane="p2">Marketing functions</a></li>
@@ -103,7 +103,7 @@ for (const id of ['s2', 'sel3']) document.getElementById(id).addEventListener('i
 
     // the editor opened: proven by what became visible
     expect(of('entry-open').map((r) => [r.element?.name, r.status]), say).toEqual([['Delete old sales', 'pass']]);
-    expect(of('entry-open')[0]!.actual).toMatch(/opened: new content was shown \("Role editor"\)/);
+    expect(of('entry-open')[0]!.actual).toMatch(/opened: new content was shown \("Record editor"\)/);
     expect(log.open).toEqual(['row1']);
 
     // every tab that was not active was switched to, and verified by its active marker AND panel visibility

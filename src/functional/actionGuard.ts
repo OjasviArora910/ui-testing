@@ -3,6 +3,17 @@
  * It blocks (1) actions whose visible intent is destructive, (2) cross-origin navigation,
  * (3) payment-looking fields, and (4) at network level any write method not explicitly allowed.
  */
+/**
+ * Wording that marks a setting as one that decides what someone may see or do. A state control (checkbox, switch, slider,
+ * select, field) whose own label or surrounding context (dialog title, legend, heading, tab) carries it CHANGES A
+ * PERMISSION when it is operated, whatever its own label says.
+ */
+const SENSITIVE_SETTING = /\b(permissions?|privileges?|roles?|access (rights?|levels?|control|policy|policies)|entitlements?|authori[sz]ations?|security (settings?|polic(y|ies)|groups?|questions?)|acls?|grant(s|ed|ing)?|two[- ]factor|2fa|mfa|password polic(y|ies)|api keys?|access tokens?|single sign[- ]on|sso)\b/i;
+/** Looking something up is not changing it: search / filter fields are never sensitive settings. */
+/** Controls that only arrange a list: page size, sorting, density, visible columns. */
+const LIST_CONTROL = /\b(rows?|items?|results?|entries|records?) per page\b|\bper page\b|\bpage size\b|\bsort(ed)? by\b|\border by\b|\bview as\b|\bdensity\b|\b(show|visible|hide) columns?\b|\bshow \d+\b/i;
+const LOOKUP_FIELD = /\b(search|filter|find|look ?up|quick find)\b/i;
+
 export type GuardActionKind = 'click' | 'fill' | 'select' | 'check' | 'hover' | 'press' | 'submit' | 'navigate';
 
 export interface GuardAction {
@@ -22,6 +33,12 @@ export interface GuardAction {
   fieldType?: string;
   fieldName?: string;
   autocomplete?: string;
+  /** For a state control: what directly governs it (dialog title, fieldset legend, tab panel, table column). See functional/sensitive.ts. */
+  context?: string;
+  /** For a state control: the nearest section / page heading above it. Circumstantial only. */
+  heading?: string;
+  /** For a state control: 'row-selection' when it only selects a row or all rows. */
+  purpose?: string;
 }
 
 export interface GuardDecision {
@@ -30,7 +47,7 @@ export interface GuardDecision {
    * destructive  removes or ends something: NEVER executable, by any policy
    * mutating     creates or changes something: blocked by default, executable only inside an explicitly authorized workflow step
    */
-  tier?: 'destructive' | 'mutating';
+  tier?: 'destructive' | 'mutating' | 'sensitive';
 }
 
 /**
@@ -223,6 +240,22 @@ export class ActionGuard {
       // but a direct guard.check call from the explorer uses this path too).
       if ((a.kind === 'fill' || a.kind === 'select') && (PAYMENT_FIELD.test(a.fieldName ?? '') || PAYMENT_FIELD.test(a.autocomplete ?? ''))) {
         return { allowed: false, reason: 'payment-related field', matched: 'payment-field' };
+      }
+      // A control that sets a permission, role or access right is never operated in normal QA: toggling it is the
+      // sensitive act itself, whether or not anything is saved afterwards. No workflow authorization covers it.
+      // Typing into a text field (a name, a description, a search) sets no permission; the controls that do are the
+      // ones that switch or choose: checkboxes, switches, sliders and selects.
+      const own = `${a.name ?? ''} | ${a.fieldName ?? ''}`;
+      const lookup = a.kind === 'fill' || LOOKUP_FIELD.test(own);
+      if (!lookup) {
+        // (a) the control names a permission itself, or (b) what directly governs it does: decisive, no exception
+        const direct = SENSITIVE_SETTING.test(own) ? `"${(a.name ?? a.fieldName ?? '').slice(0, 60)}"` : SENSITIVE_SETTING.test(a.context ?? '') ? `in "${(a.context ?? '').slice(0, 80)}"` : null;
+        // (c) only the section / page heading says so: the control COULD set a permission, so it is refused unless its
+        // purpose is established as harmless (selecting rows, paging, sorting, choosing how a list is shown)
+        const harmless = a.purpose === 'row-selection' || LIST_CONTROL.test(own);
+        const byHeading = !direct && !harmless && SENSITIVE_SETTING.test(a.heading ?? '') ? `under "${(a.heading ?? '').slice(0, 80)}", purpose not established` : null;
+        const where = direct ?? byHeading;
+        if (where) return { allowed: false, reason: `changes a permission or access setting (${where}); such controls are not operated in normal QA`, matched: 'sensitive-setting', tier: 'sensitive' };
       }
       return { allowed: true };
     }
