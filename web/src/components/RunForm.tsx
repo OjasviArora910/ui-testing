@@ -424,7 +424,7 @@ export function RunForm({
             <div className="advanced-toggle-wrapper">
               <button
                 type="button"
-                className="btn-text"
+                className="btn-text wizard-advanced-toggle"
                 onClick={() => setShowAdvanced(!showAdvanced)}
               >
                 {showAdvanced ? '- Hide Crawler Limits' : '+ Advanced Crawler Limits (Pages, Depth, Budget)'}

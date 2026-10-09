@@ -782,6 +782,24 @@ a:hover {
   background: rgba(255, 255, 255, 0.025);
 }
 
+.wizard-advanced-toggle {
+  display: inline-flex;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid rgba(56, 189, 248, 0.38);
+  border-radius: var(--radius-md);
+  background: rgba(56, 189, 248, 0.08);
+  color: #7dd3fc;
+  font-weight: 800;
+}
+
+.wizard-advanced-toggle:hover,
+.wizard-advanced-toggle:focus-visible {
+  border-color: rgba(56, 189, 248, 0.68);
+  background: rgba(56, 189, 248, 0.14);
+  color: #bae6fd;
+}
+
 .wizard-actions {
   display: flex;
   align-items: center;
