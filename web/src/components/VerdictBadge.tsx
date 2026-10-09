@@ -1,4 +1,4 @@
-import { IconAlertTriangle, IconCheck, IconCritical, IconInfo, IconShield } from './Icons';
+import { IconAlertTriangle, IconCheck, IconInfo, IconShield } from './Icons';
 
 interface VerdictBadgeProps {
   verdict: string;
@@ -15,7 +15,7 @@ export function VerdictBadge({ verdict, small }: VerdictBadgeProps) {
       case 'PASS_WITH_WARNINGS':
         return <IconAlertTriangle style={{ width: small ? 12 : 14, height: small ? 12 : 14 }} />;
       case 'FAILED':
-        return <IconCritical style={{ width: small ? 12 : 14, height: small ? 12 : 14 }} />;
+        return <IconAlertTriangle style={{ width: small ? 12 : 14, height: small ? 12 : 14 }} />;
       case 'BLOCKED_PENDING_REVIEW':
         return <IconShield style={{ width: small ? 12 : 14, height: small ? 12 : 14 }} />;
       case 'INCOMPLETE':
@@ -25,10 +25,13 @@ export function VerdictBadge({ verdict, small }: VerdictBadgeProps) {
     }
   };
 
-  const formatted = verdict.replace(/_/g, ' ');
+  const formatted = norm === 'FAILED' ? 'ISSUES FOUND' : verdict.replace(/_/g, ' ');
+  const title = norm === 'FAILED'
+    ? 'The test run completed, and confirmed issues were found in the target app.'
+    : formatted;
 
   return (
-    <span className={`verdict-pill v-${norm} ${small ? 'verdict-pill-sm' : ''}`}>
+    <span className={`verdict-pill v-${norm} ${small ? 'verdict-pill-sm' : ''}`} title={title}>
       <span className="verdict-icon">{getIcon()}</span>
       <span className="verdict-label">{formatted}</span>
     </span>
