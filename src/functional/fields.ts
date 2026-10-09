@@ -1,3 +1,4 @@
+import { controlContext } from './sensitive.js';
 import type { RawField } from '../browser/types.js';
 import type { ModelElement } from '../discovery/types.js';
 import { elementOf, resetPage } from './helpers.js';
@@ -43,7 +44,7 @@ export async function testFields(ctx: FunctionalContext): Promise<FunctionalResu
     const ref = elementOf(el);
     const push = (r: FunctionalResult): void => { const x = { ...r, scenario }; results.push(x); ctx.onResult?.(x); };
     const kind = el.type === 'select' ? 'select' : el.type === 'checkbox' || el.type === 'radio' ? 'check' : 'fill';
-    const decision = guard.check({ kind, selector: el.selector, name: el.name, fieldName: el.name, fieldType: String(el.meta?.inputType ?? el.type) });
+    const decision = guard.check({ kind, selector: el.selector, name: el.name, fieldName: el.name, fieldType: String(el.meta?.inputType ?? el.type), ...(await controlContext(c, el.selector)) });
     if (!decision.allowed) {
       push({ ...BASE, check: 'guard', status: 'skipped', severity: 'info', basis: null, element: ref, expected: 'Safe form controls are exercised', actual: `Not used: ${decision.reason}`, details: { guard: decision } });
       continue;

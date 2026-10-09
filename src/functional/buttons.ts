@@ -1,3 +1,4 @@
+import { inspectDialog, resolveUnexpectedDialog } from './sensitive.js';
 import { elementOf, resetPage, targetFor } from './helpers.js';
 import { classifyElementIntent, toClassifiable } from './intent.js';
 import { clickAndObserve, notInteractable, prepareInteraction } from './interact.js';
@@ -142,6 +143,7 @@ export async function testButtons(ctx: FunctionalContext): Promise<FunctionalRes
 
     // 3. Pre-Action Baseline Capture
     await rememberControls(c); // so the controls this click reveals can be told apart afterwards
+    const dialogBefore = (await inspectDialog(c))?.key ?? null;
     const pre = await capturePreActionSnapshot(c, b.selector, { captureScreenshot: needScreenshot });
 
     // 4. CLICKING Phase
@@ -293,6 +295,17 @@ export async function testButtons(ctx: FunctionalContext): Promise<FunctionalRes
       });
       // 7b. Run generic UI/UX inspection on the verified rendered state
       await inspectCurrentUI(ctx, label, push);
+    }
+
+    // A warning / confirmation / security dialog that this click brought up is not a state to explore: it is identified,
+    // dismissed only through its negative control (nothing affirmative is ever clicked), and recorded.
+    const surprise = res.ok ? await resolveUnexpectedDialog(ctx, dialogBefore).catch(() => null) : null;
+    if (surprise) {
+      push({ ...BASE, check: 'unexpected-dialog', status: 'inconclusive', severity: 'info', basis: null, element: el, confidence: 'LOW',
+        expected: `Activating "${label}" does not require confirming a sensitive operation`,
+        actual: `After clicking "${label}", an unexpected ${surprise.dialog.type} dialog appeared ("${surprise.dialog.text.slice(0, 120)}"; buttons: ${surprise.dialog.buttons.join(', ') || 'none'}); ${surprise.how}. Nothing was confirmed`,
+        screenshot: observation.screenshot });
+      continue;
     }
 
     // 8. What the click revealed (a dialog, a panel, an editor): its safe, reversible controls are tested in place and

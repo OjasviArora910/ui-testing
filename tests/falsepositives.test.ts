@@ -194,7 +194,6 @@ describe('conservative verification: working UI is not a bug, broken UI still is
       ['pagination: next', /Next page/],
       ['dropdown menu', /^Actions$/],
       ['modal without dialog semantics', /View summary/],
-      ['native confirm dialog', /Ask before leaving/],
       ['theme toggle', /Toggle theme/],
       ['pressed-state button', /^Bold$/],
       ['switch', /Notifications/],
@@ -203,6 +202,13 @@ describe('conservative verification: working UI is not a bug, broken UI still is
       const got = classes(r, name);
       expect(got.length, `a result for ${name}`).toBeGreaterThan(0);
       expect(got.every((x) => x === 'EXPECTED'), `${name}: ${of(r, name).map((x) => `[${x.check}] ${x.actual}`).join(' | ')}`).toBe(true);
+    });
+
+    it('a native confirm dialog is cancelled for safety: INCONCLUSIVE (the action is not verified), never a pass and never a bug', () => {
+      const got = of(r, /Ask before leaving/);
+      expect(got.length).toBeGreaterThan(0);
+      expect(got.map((x) => [x.check, classifyResult(x)])).toEqual([['native-dialog-cancelled', 'INCONCLUSIVE']]);
+      expect(got[0]!.actual).toMatch(/safely cancelled \(never accepted\), so the intended action was not performed and is not verified/);
     });
 
     it('form controls are exercised too and are silent when they take the value', () => {

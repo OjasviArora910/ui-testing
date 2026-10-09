@@ -119,14 +119,16 @@ describe('safety tiers: destructive never, mutating only when explicitly authori
    *
    * The element semantics / action kind must matter more than arbitrary text inside configuration data.
    */
-  it('permission control labels with dangerous words are allowed; actual action buttons with the same words are blocked', () => {
+  it('setting labels with dangerous words are data, not commands; permission / role settings are refused; action buttons with the same words are blocked', () => {
     const g = mk();
 
     // Checkboxes (kind=check): label is a PERMISSION NAME, not an action. Must be allowed regardless of words.
     expect(g.check({ kind: 'check', text: 'Send Publish Copy', name: 'Send Publish Copy' }).allowed, 'check: Send Publish Copy').toBe(true);
-    expect(g.check({ kind: 'check', text: 'Delete Permission', name: 'Delete Permission' }).allowed, 'check: Delete Permission').toBe(true);
+    expect(g.check({ kind: 'check', text: 'Delete Permission', name: 'Delete Permission' }).allowed, 'check: Delete Permission').toBe(false); // names a permission: a sensitive setting, refused (see tests/sensitive_actions.test.ts)
     expect(g.check({ kind: 'check', text: 'Remove Access', name: 'Remove Access' }).allowed, 'check: Remove Access').toBe(true);
-    expect(g.check({ kind: 'check', text: 'Assign Role', name: 'Assign Role' }).allowed, 'check: Assign Role').toBe(true);
+    expect(g.check({ kind: 'check', text: 'Assign Role', name: 'Assign Role' }).allowed, 'check: Assign Role').toBe(false); // names a role: a sensitive setting, refused
+    // the same harmless-looking label is refused when the control sits in a permission / role / access context
+    expect(g.check({ kind: 'check', text: 'Send Publish Copy', name: 'Send Publish Copy', context: 'Edit Roles > Permissions' })).toMatchObject({ allowed: false, tier: 'sensitive' });
     expect(g.check({ kind: 'check', text: 'Create Records', name: 'Create Records' }).allowed, 'check: Create Records').toBe(true);
     expect(g.check({ kind: 'check', text: 'Update Contacts', name: 'Update Contacts' }).allowed, 'check: Update Contacts').toBe(true);
     expect(g.check({ kind: 'check', text: 'Send Emails', name: 'Send Emails' }).allowed, 'check: Send Emails').toBe(true);

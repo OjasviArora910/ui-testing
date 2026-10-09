@@ -26,22 +26,22 @@ describe('reversible controls: test, verify, restore (browser)', () => {
       if (p === '/state') { const c = u.searchParams.get('c')!; (log[c] ??= []).push(u.searchParams.get('v')!); res.end('ok'); return; }
       if (p.startsWith('/api/')) { res.setHeader('content-type', 'application/json'); res.end('{"ok":true}'); return; }
       res.setHeader('content-type', 'text/html');
-      res.end(`<!doctype html><html lang="en"><head><title>Roles</title>
+      res.end(`<!doctype html><html lang="en"><head><title>Records</title>
 <style>body{font-family:sans-serif;margin:24px}#editor{display:none;border:1px solid #999;padding:16px;margin-top:16px}
 .ui-slider{position:relative;width:200px;height:8px;background:#ccc;margin:14px 0}.ui-slider-handle{position:absolute;top:-6px;width:16px;height:20px;background:#246;display:block}
 label{display:block;margin:8px 0}</style></head><body>
-<main><h1>Roles</h1>
+<main><h1>Records</h1>
 <label>Page size <input type="range" id="zoom" min="0" max="10" value="4"></label>
-<button type="button" id="edit">Edit role</button>
+<button type="button" id="edit">Edit record</button>
 <div id="editor">
-  <h2>Permissions</h2>
+  <h2>Preferences</h2>
   <label>Contacts access <input type="range" id="perm" min="0" max="4" value="4"></label>
   <div class="row">Reports access <div class="ui-slider"><span class="ui-slider-handle" id="custom" tabindex="0" style="left: 50%"></span></div></div>
   <label><input type="checkbox" id="notify" checked> Send notifications</label>
   <label><input type="checkbox" id="broken"> Weekly digest</label>
   <label><input type="checkbox" id="lock"> Lock Out</label>
   <label>Scope <select id="scope"><option value="own">Own</option><option value="team" selected>Team</option><option value="all">All</option></select></label>
-  <label>Role name <input type="text" id="name" value="Sales manager"></label>
+  <label>Record name <input type="text" id="name" value="Sales manager"></label>
   <button type="button" id="save">Save</button> <button type="button" id="del">Delete role</button>
 </div></main>
 <script>
@@ -87,7 +87,7 @@ document.getElementById('del').onclick = () => post('/api/DeleteRole');
     expect(of(/Reports access/), say).toEqual([]);
     expect(of(/Send notifications/).map((r) => [r.check, r.classification]), say).toEqual([['reversible-toggle', 'EXPECTED']]);
     expect(of(/Scope/).map((r) => [r.check, r.classification]), say).toEqual([['reversible-select', 'EXPECTED']]);
-    expect(of(/Role name/).map((r) => [r.check, r.classification]), say).toEqual([['reversible-text', 'EXPECTED']]);
+    expect(of(/Record name/).map((r) => [r.check, r.classification]), say).toEqual([['reversible-text', 'EXPECTED']]);
     expect(of(/Page size/), say).toEqual([]); // page sliders are explicitly not tested
 
     // seen from the server: every control moved away from its initial value and ended on it again
@@ -121,7 +121,7 @@ document.getElementById('del').onclick = () => post('/api/DeleteRole');
  *
  * This fixture proves:
  * 1. Custom sliders with aria-valuenow: original → changed → verified ≠ original → restored → verified = original (PASS)
- * 2. Checkboxes labeled "Send Publish Copy", "Delete Permission" etc.: exercised (not blocked) and restored (PASS)
+ * 2. Checkboxes labeled "Send Publish Copy", "Delete Drafts" etc.: exercised (not blocked) and restored (PASS)
  * 3. Tab with visible panel: active marker + panel visibility verified (PASS, not INCONCLUSIVE)
  * 4. A slider with no accessible state: INCONCLUSIVE (not fake PASS)
  */
@@ -136,7 +136,7 @@ describe('custom permission sliders, permission-label checkboxes, and tab panel 
       if (p === '/state') { const c = u.searchParams.get('c')!; (log[c] ??= []).push(u.searchParams.get('v')!); res.end('ok'); return; }
       if (p.startsWith('/api/')) { res.setHeader('content-type', 'application/json'); res.end('{"ok":true}'); return; }
       res.setHeader('content-type', 'text/html');
-      res.end(`<!doctype html><html lang="en"><head><title>Permission Editor</title>
+      res.end(`<!doctype html><html lang="en"><head><title>Preference Editor</title>
 <style>
 body{font-family:sans-serif;margin:24px}
 #editor{display:none;border:1px solid #999;padding:16px;margin-top:16px}
@@ -153,10 +153,10 @@ ul.tabs li.active{border-bottom-color:#333;font-weight:bold}
 .pane{display:none;padding:12px;border:1px solid #ddd;margin-top:0}
 .pane.active{display:block}
 </style></head><body>
-<main><h1>Permission Editor</h1>
-<button type="button" id="edit">Edit role</button>
+<main><h1>Preference Editor</h1>
+<button type="button" id="edit">Edit record</button>
 <div id="editor">
-  <h2>Permissions</h2>
+  <h2>Preferences</h2>
 
   <!-- Tab structure with named panels -->
   <ul class="tabs" id="tabs">
@@ -164,7 +164,7 @@ ul.tabs li.active{border-bottom-color:#333;font-weight:bold}
     <li data-pane="tab-advanced">Advanced</li>
   </ul>
   <div class="pane active" id="tab-general">
-    <h3>General permissions</h3>
+    <h3>General preferences</h3>
     <!-- aria-valuenow custom slider: the pattern used by many real CRM permission UIs -->
     <div class="perm-row">
       <span class="perm-label">Interactive Data</span>
@@ -185,8 +185,8 @@ ul.tabs li.active{border-bottom-color:#333;font-weight:bold}
 
     <!-- Permission checkboxes with "dangerous" label words — these are DATA labels, not commands -->
     <label><input type="checkbox" id="perm-send-publish" checked> Send Publish Copy</label>
-    <label><input type="checkbox" id="perm-delete-perm"> Delete Permission</label>
-    <label><input type="checkbox" id="perm-assign"> Assign Role</label>
+    <label><input type="checkbox" id="perm-delete-perm"> Delete Drafts</label>
+    <label><input type="checkbox" id="perm-assign"> Assign Tasks</label>
     <label><input type="checkbox" id="perm-create-rec" checked> Create Records</label>
 
     <!-- The real access-removing control: must never be touched -->
@@ -290,8 +290,8 @@ document.getElementById('del').onclick = () => post('/api/DeleteRole');
     expect(log['slider-forms']).toBeUndefined();
 
     // ---- permission checkboxes with "dangerous" labels: must NOT be BLOCKED_BY_SAFETY
-    // "Send Publish Copy", "Delete Permission", "Assign Role", "Create Records" are permission names, not commands
-    for (const label of [/Send Publish Copy/, /Delete Permission/, /Assign Role/, /Create Records/]) {
+    // "Send Publish Copy", "Delete Drafts", "Assign Tasks", "Create Records" are setting names, not commands
+    for (const label of [/Send Publish Copy/, /Delete Drafts/, /Assign Tasks/, /Create Records/]) {
       const results_for = results.filter((r) => label.test(r.target ?? ''));
       if (results_for.length > 0) {
         expect(results_for.every((r) => r.classification !== 'BLOCKED_BY_SAFETY'), `${label.source} was blocked by safety\n${say}`).toBe(true);

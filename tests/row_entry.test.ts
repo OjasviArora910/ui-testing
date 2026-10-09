@@ -28,11 +28,11 @@ describe('generic row entry controls and the UI they reveal (browser)', () => {
       if (u.pathname === '/did') { const k = u.searchParams.get('c')!; (log[k] ??= []).push(u.searchParams.get('v') ?? ''); res.end('ok'); return; }
       if (u.pathname.startsWith('/api/')) { res.setHeader('content-type', 'application/json'); res.end('{"ok":true}'); return; }
       res.setHeader('content-type', 'text/html');
-      res.end(`<!doctype html><html lang="en"><head><title>Roles</title>
+      res.end(`<!doctype html><html lang="en"><head><title>Records</title>
 <style>body{font-family:sans-serif;margin:24px}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:6px 10px}
 .rname{color:#06c;cursor:pointer}.ico{display:inline-block;width:20px;height:20px;background:#888;cursor:pointer}
 #editor{display:none;border:1px solid #999;padding:16px;margin-top:16px}#help{display:none;position:fixed;inset:20% 30%;background:#fff;border:1px solid #333;padding:20px}label{display:block;margin:6px 0}</style></head><body>
-<main><h1>Roles</h1>
+<main><h1>Records</h1>
 <a id="create" href="#"><span>C</span><span>r</span><span>e</span><span>a</span><span>t</span><span>e</span></a>
 <button type="button" id="helpbtn">Show help</button>
 <table id="roles">
@@ -45,7 +45,7 @@ describe('generic row entry controls and the UI they reveal (browser)', () => {
   <tr id="wholerow1" style="cursor:pointer"><td>Whole row one</td></tr>
   <tr id="wholerow2" style="cursor:pointer"><td>Whole row two</td></tr>
 </table>
-<div id="editor"><h2>Edit role</h2>
+<div id="editor"><h2>Edit record</h2>
   <label>Contacts access <input type="range" id="perm" min="0" max="4" value="2"></label>
   <label><input type="checkbox" id="notify" checked> Send notifications</label>
   <label><input type="checkbox" id="lock"> Lock Out</label>
@@ -144,7 +144,7 @@ for (const id of ['notify', 'lock']) document.getElementById(id).addEventListene
 
     // the row entry controls opened the editor: concrete proof, not "something changed"
     expect(of(/^Alpha role$/, 'entry-open').map((r) => r.status), say).toEqual(['pass']);
-    expect(of(/^Alpha role$/, 'entry-open')[0]!.actual).toMatch(/opened: new content was shown \("Edit role"\): \d+ control\(s\), 1 heading\(s\)/);
+    expect(of(/^Alpha role$/, 'entry-open')[0]!.actual).toMatch(/opened: new content was shown \("Edit record"\): \d+ control\(s\), 1 heading\(s\)/);
     expect(of(/^pencil$/, 'entry-open').map((r) => r.status), say).toEqual(['pass']);
     expect(log.open).toEqual(expect.arrayContaining(['Alpha role', 'pencil1']));
     expect((log.open ?? []).some((v) => /Beta|pencil2/.test(v))).toBe(false); // one row is enough
