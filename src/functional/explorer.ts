@@ -1,5 +1,8 @@
 import type { BrowserController } from '../browser/index.js';
+import { normalizeUrl, sameOrigin, samePage } from '../discovery/crawler.js';
+import { buildPageModel } from '../discovery/pageModel.js';
 import { inspectCurrentUI } from './buttons.js';
+import { sameViewUrl, viewSignature } from './helpers.js';
 import { testReversibleControls } from './reversible.js';
 import type { FunctionalContext, FunctionalResult } from './types.js';
 
@@ -96,6 +99,8 @@ export interface StateSnapshot {
   /** Labels of the choices currently active (tabs, steps). */
   active: string[];
   navigators: Navigator[];
+  /** What the revealed UI shows (its visible text), reduced to a comparable value. Two views with the same controls but different content are different states. */
+  content: string;
   /** Labels of every clickable thing in scope: what a menu or panel offers, for the record. */
   options: string[];
   /** Validation-looking messages currently shown. */
@@ -144,7 +149,8 @@ const DISCLOSURE_OPTIONS_SCRIPT = `((mark, navId) => {
       seen.add(item);
       const optId = 'opt_' + out.length;
       item.setAttribute('data-qa-opt', optId);
-      out.push({ id: optId, label: l });
+      const link = item.tagName === 'A';
+      out.push({ id: optId, label: l, href: link ? item.getAttribute('href') : null, url: link ? item.href : null });
     }
   }
   return out;
@@ -217,8 +223,11 @@ const SNAPSHOT_SCRIPT = `((mark) => {
     const expandedAttr = el.getAttribute('aria-expanded');
     const hasPopup = el.getAttribute('aria-haspopup');
     const isMoreOrMenu = /(\\b|_|-)(dropdown|menu|ellipsis|more|kebab|overflow|actions|sort|filter)(\\b|_|-)/i.test(cls(el) + ' ' + (el.id || '') + ' ' + (el.getAttribute('aria-label') || '')) || /^(((\\.\\.\\.|…)|more(\\s+actions|\\s+options)?|actions|menu|options|sort(\\s+by)?|filter))\\b/i.test(l);
+    // An item INSIDE a menu is a choice, not something that opens a menu, unless it declares so itself (a nested submenu).
+    // Its class often contains "dropdown" or "menu" (dropdown-item, menu-item): that wording alone does not make it a trigger.
+    const isChoice = !!el.closest('.dropdown-menu, [role=menu], [role=listbox], .dropdown-content, .select-options') || el.matches('[role=menuitem], [role=menuitemradio], [role=menuitemcheckbox], [role=option]');
     if (el.tagName === 'SUMMARY') add(el, 'disclosure', 'd', false, !!(el.parentElement && el.parentElement.open));
-    else if (toggle === 'dropdown' || toggle === 'collapse' || (expandedAttr !== null && (el.getAttribute('aria-controls') || hasPopup)) || (hasPopup && hasPopup !== 'false') || isMoreOrMenu) {
+    else if (toggle === 'dropdown' || toggle === 'collapse' || (expandedAttr !== null && (el.getAttribute('aria-controls') || hasPopup)) || (hasPopup && hasPopup !== 'false') || (isMoreOrMenu && !isChoice)) {
       add(el, 'disclosure', 'd', false, expandedAttr === 'true');
     }
   }
@@ -244,19 +253,322 @@ const SNAPSHOT_SCRIPT = `((mark) => {
   parts.sort();
   const raw = parts.join(';') + '||' + headings.map(norm).join(';') + '||' + active.map(norm).join(';') + '||' + expanded.map(norm).join(';') + '||' + dialogs;
   let h = 5381; for (let i = 0; i < raw.length; i++) h = ((h << 5) + h + raw.charCodeAt(i)) | 0;
-  return { fingerprint: (h >>> 0).toString(36) + ':' + parts.length, controls, headings, dialogs, active, navigators: navs, options: Array.from(new Set(options)), messages };
+  // the text the revealed UI shows (leaf elements only, bounded)
+  let ch = 5381; let cn = 0; let looked = 0;
+  for (const el of document.querySelectorAll('h1,h2,h3,h4,h5,h6,legend,label,th,td,p,li,dt,dd,span,a,button,strong,em,b,[role=heading]')) {
+    if (cn >= 400 || looked >= 1500) break;
+    // membership first (a set lookup); "is it displayed" needs layout and is asked only for what the interaction revealed
+    if (el.children.length > 0 || root.has(el)) continue;
+    looked++;
+    if (!visible(el)) continue;
+    const t = (el.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 80); if (!t) continue;
+    cn++; for (let i = 0; i < t.length; i++) ch = ((ch << 5) + ch + t.charCodeAt(i)) | 0;
+  }
+  return { fingerprint: (h >>> 0).toString(36) + ':' + parts.length, controls, headings, dialogs, active, navigators: navs, content: (ch >>> 0).toString(36) + ':' + cn, options: Array.from(new Set(options)), messages };
 })`;
 
 export async function snapshotState(c: BrowserController): Promise<StateSnapshot | null> {
   return (await c.page.evaluate(`${SNAPSHOT_SCRIPT}(${JSON.stringify(MARK)})`).catch(() => null)) as StateSnapshot | null;
 }
 
-interface Run { visited: Set<string>; limits: ExploreLimits; states: string[] }
+interface Run {
+  visited: Set<string>; limits: ExploreLimits; states: string[];
+  /** Options already executed in this exploration. A menu reached by two mechanisms is still gone through once. */
+  done: Set<string>;
+  /** Menu items with a destination that were followed (bounded per exploration). */
+  followed: number;
+  /** Opens the control this exploration started from again, when following one of its items closed it. */
+  reopen?: () => Promise<void>;
+}
+
+/** A menu item. `href`/`url`: its raw and resolved destination when it is a link. */
+interface MenuOption { id: string; label: string; href?: string | null; url?: string | null }
+const optionKey = (o: MenuOption): string => `${o.label}|${o.href ?? ''}`;
+const MAX_FOLLOWED_LINKS = 40;
+
+/**
+ * Where a menu item leads, when it is a link to another view of this application: a same-origin address that is not the
+ * view we are on. null for an item that acts in place (href="#", javascript:, a button), which is exercised as an option.
+ */
+function destinationOf(o: MenuOption, current: string): string | null {
+  const raw = (o.href ?? '').trim();
+  if (!raw || raw === '#' || /^javascript:/i.test(raw) || !o.url) return null;
+  const n = normalizeUrl(o.url, current, { hashRouted: true });
+  if (!n || !sameOrigin(n, current) || samePage(n, current)) return null;
+  // an anchor inside this same document (#section) is not another view
+  try { const a = new URL(n); const b = new URL(current); if (a.pathname === b.pathname && a.search === b.search && a.hash.length > 1 && !a.hash.includes('/') && !/^#!/.test(a.hash) && b.hash.length <= 1) return null; } catch { return null; }
+  return n;
+}
+
+const CLICK_OPTION_SCRIPT = `((optId, optLabel, href) => {
+  const text = (e) => (e ? (e.innerText || e.textContent || '') : '').replace(/\\s+/g, ' ').trim();
+  const word = (x) => (/^(\\S\\s)+\\S$/.test(x) ? x.replace(/\\s/g, '') : x);
+  const labelOf = (e) => word(e.getAttribute('aria-label') || text(e) || e.getAttribute('title') || e.getAttribute('value') || '').slice(0, 60);
+  // A mark left by an earlier look at ANOTHER menu can carry the same id: the element is the option only if it also has
+  // the option's label. Otherwise the option is looked up by what it is called.
+  const byMark = [document.querySelector('[data-qa-menu-opt="' + optId + '"]'), document.querySelector('[data-qa-opt="' + optId + '"]')].find((e) => e && labelOf(e) === optLabel) || null;
+  let el = byMark;
+  // by destination only when it is one: "#" and javascript: are shared by every in-place control of the page
+  if (!el && href && href !== '#' && !/^javascript:/i.test(href)) el = Array.from(document.querySelectorAll('a')).find((a) => a.getAttribute('href') === href) || null;
+  if (!el) {
+    // the control itself before any wrapper around it: a click on the <li> does not reach a handler on its <a>
+    const controls = Array.from(document.querySelectorAll('a, button, [role=menuitem], [role=menuitemradio], [role=option], .dropdown-item, .menu-item'));
+    el = controls.find((e) => labelOf(e) === optLabel) || Array.from(document.querySelectorAll('li')).find((e) => labelOf(e) === optLabel) || null;
+  }
+  if (!el) return { ok: false, error: 'Option element not found' };
+  if (el.scrollIntoViewIfNeeded) el.scrollIntoViewIfNeeded(); else el.scrollIntoView({ block: 'nearest' });
+  const r = el.getBoundingClientRect();
+  const opts = { bubbles: true, cancelable: true, view: window };
+  el.dispatchEvent(new MouseEvent('pointerdown', opts));
+  el.dispatchEvent(new MouseEvent('mousedown', opts));
+  el.dispatchEvent(new MouseEvent('pointerup', opts));
+  el.dispatchEvent(new MouseEvent('mouseup', opts));
+  el.click();
+  return { ok: true, box: { x: r.x, y: r.y, width: r.width, height: r.height } };
+})`;
+
+/**
+ * A menu item that leads to another view: it is followed ONCE per run (the same destination offered by the menu of every
+ * page is not followed again), and it passes only when the browser is at the destination and another view is shown.
+ * The destination becomes a page of the run, so its own controls are tested there, in its own time share. Then the view
+ * the menu belongs to is restored. Returns false when that view could not be restored (the caller reloads the page).
+ */
+async function followMenuLink(ctx: FunctionalContext, push: (r: FunctionalResult) => void, run: Run, where: string, opt: MenuOption, dest: string): Promise<boolean> {
+  const c = ctx.controller;
+  if (ctx.testedLinks?.has(dest)) return true;
+  // the destination itself goes through the safety guard, exactly as a link the crawler would follow
+  const decision = ctx.guard.check({ kind: 'click', name: opt.label, text: opt.label, href: dest, role: 'link' });
+  if (!decision.allowed) {
+    push({ kind: 'link', check: 'guard', status: 'skipped', severity: 'info', basis: null, element: { selector: `${where} > ${opt.label}`, name: opt.label, role: 'link' }, expected: 'Safe menu items are followed', actual: `Not followed: ${decision.reason}`, details: { guard: decision } });
+    return true;
+  }
+  if (run.followed >= MAX_FOLLOWED_LINKS || !ctx.budget.consume()) return true;
+  ctx.testedLinks?.add(dest);
+  run.followed++;
+  const ref = { selector: `${where} > ${opt.label}`, name: opt.label, role: 'link' };
+  const expected = `"${opt.label}" in "${where}" opens ${dest}`;
+  const home = c.page.url();
+  const viewBefore = await viewSignature(c);
+  const before = await c.page.screenshot({ type: 'jpeg', quality: 65 }).catch(() => undefined);
+  ctx.onAction?.({ phase: 'TARGETED', type: 'menu-navigation', target: `${where} > ${opt.label}`, ok: true, buffer: before, expected });
+  c.beginAction();
+  const clicked = (await c.page.evaluate(`${CLICK_OPTION_SCRIPT}(${JSON.stringify(opt.id)}, ${JSON.stringify(opt.label)}, ${JSON.stringify(opt.href ?? '')})`).catch((e) => ({ ok: false, error: String(e) }))) as { ok: boolean; error?: string };
+  await c.settle(250); await c.waitForIdle(2500);
+  const landed = c.page.url();
+  const reached = samePage(landed, dest);
+  const changed = (await viewSignature(c)) !== viewBefore;
+  const after = await c.page.screenshot({ type: 'jpeg', quality: 65 }).catch(() => undefined);
+  const proof = { before, screenshot: after, trace: { action: `click menu item "${opt.label}" in "${where}"`, urlBefore: home, urlAfter: landed, network: [], console: [], changes: [`address: ${home} -> ${landed}`, changed ? 'the view shown changed' : 'the view shown did not change'] } };
+
+  let actual: string; let ok = false;
+  if (!clicked.ok) {
+    actual = `"${opt.label}" could not be clicked: ${clicked.error ?? 'element not found'}`;
+    push({ kind: 'link', check: 'menu-navigation', status: 'inconclusive', severity: 'info', basis: null, element: ref, expected, actual, confidence: 'LOW', ...proof });
+  } else if (reached && changed) {
+    ok = true;
+    const title = ((await c.page.evaluate("((document.querySelector('h1,h2,[role=heading]') || {}).textContent || document.title || '').replace(/\\s+/g, ' ').trim().slice(0, 80)").catch(() => '')) as string);
+    const model = await buildPageModel(c).catch(() => null);
+    const scheduled = model ? ctx.onDiscoveredPage?.({ url: dest, label: opt.label, title, model }) : undefined;
+    actual = `"${opt.label}" opened ${dest}${title ? ` ("${title}")` : ''}: the destination view was shown${scheduled ? '; it is tested as a page of its own' : ''}`;
+    push({ kind: 'link', check: 'menu-navigation', status: 'pass', severity: 'info', basis: null, element: ref, expected, actual, confidence: 'HIGH' });
+  } else {
+    // Not a verified navigation: the address or the view did not follow. Never reported as a pass.
+    actual = `"${opt.label}" -> ${dest} could not be verified: ${reached ? 'the address changed, but the view shown did not' : `the browser is at ${c.url}, not at the destination${changed ? ' (the content did change)' : ''}`}`;
+    push({ kind: 'link', check: 'menu-navigation', status: 'inconclusive', severity: 'info', basis: null, element: ref, expected, actual, confidence: 'LOW', ...proof });
+  }
+  ctx.onAction?.({ phase: 'RESULT', type: 'menu-navigation', target: `${where} > ${opt.label}`, ok, verdict: ok ? 'PASS' : 'NEEDS_REVIEW', confidence: ok ? 'HIGH' : 'LOW', expected, actual, buffer: after });
+
+  // back to the view the menu belongs to
+  if (c.page.url() !== home) { await c.page.goBack().catch(() => null); await c.settle(250); await c.waitForIdle(2500); }
+  if (!sameViewUrl(c.page.url(), home)) {
+    ctx.onAction?.({ type: 'restore', target: opt.label, ok: false, detail: `the view before "${opt.label}" could not be restored by going back; the page is reloaded` });
+    return false;
+  }
+  await run.reopen?.().catch(() => undefined);
+  return true;
+}
 
 /** One exploration (the UI revealed by one entry). Create it once and pass it down. */
-export const newExploration = (limits: Partial<ExploreLimits> = {}): Run => ({ visited: new Set(), limits: { ...DEFAULT_LIMITS, ...limits }, states: [] });
+export const newExploration = (limits: Partial<ExploreLimits> = {}): Run => ({ visited: new Set(), limits: { ...DEFAULT_LIMITS, ...limits }, states: [], done: new Set(), followed: 0 });
 
 const same = (a: Navigator, b: Navigator): boolean => a.kind === b.kind && a.label === b.label;
+
+interface Exercised { opt: MenuOption; wasActive: boolean }
+
+/** What a menu option looks at before and after it is selected: the page OUTSIDE its menu, and the option's own marking. */
+interface OptionView { found: boolean; active: boolean; sig: string; url: string; dialogs: number; /** every visible heading, joined */ heading: string; headings: string[]; box: { x: number; y: number; width: number; height: number } | null }
+
+/**
+ * Evidence for "selecting this option did something". The menu closing after a choice is not evidence, so the text and
+ * form values are read everywhere EXCEPT inside the menu the option belongs to. Also: where the browser is, how many
+ * dialogs are shown, the first heading, and whether the option itself is marked as the selected choice.
+ */
+const OPTION_VIEW_SCRIPT = `((optId, optLabel, href) => {
+  const text = (e) => (e ? (e.innerText || e.textContent || '') : '').replace(/\\s+/g, ' ').trim();
+  const word = (x) => (/^(\\S\\s)+\\S$/.test(x) ? x.replace(/\\s/g, '') : x);
+  const labelOf = (e) => word(e.getAttribute('aria-label') || text(e) || e.getAttribute('title') || e.getAttribute('value') || '').slice(0, 60);
+  // A mark left by an earlier look at ANOTHER menu can carry the same id: the element is the option only if it also has
+  // the option's label. Otherwise the option is looked up by what it is called.
+  const byMark = [document.querySelector('[data-qa-menu-opt="' + optId + '"]'), document.querySelector('[data-qa-opt="' + optId + '"]')].find((e) => e && labelOf(e) === optLabel) || null;
+  let el = byMark;
+  if (!el && href && href !== '#' && !/^javascript:/i.test(href)) el = Array.from(document.querySelectorAll('a')).find((a) => a.getAttribute('href') === href) || null;
+  if (!el) el = Array.from(document.querySelectorAll('a, button, [role=menuitem], [role=menuitemradio], [role=option], .dropdown-item, .menu-item')).find((e) => labelOf(e) === optLabel) || null;
+  document.querySelectorAll('[data-qa-menu-root]').forEach((e) => e.removeAttribute('data-qa-menu-root'));
+  const menu = el ? el.closest('ul, ol, menu, [role=menu], [role=listbox], .dropdown-menu, .menu, .popover, .dropdown-content, .select-options') : null;
+  if (menu) menu.setAttribute('data-qa-menu-root', '1');
+  const ACTIVE = /(^|[\\s_-])(active|selected|current|is-active|checked)($|[\\s_-])/i;
+  const marked = (e) => !!e && (e.getAttribute('aria-selected') === 'true' || e.getAttribute('aria-checked') === 'true' || (!!e.getAttribute('aria-current') && e.getAttribute('aria-current') !== 'false') || ACTIVE.test(typeof e.className === 'string' ? e.className : ''));
+  const shown = (e) => (e.checkVisibility ? e.checkVisibility({ visibilityProperty: true }) : e.getClientRects().length > 0);
+  let h = 5381; let n = 0;
+  const add = (t) => { n++; for (let i = 0; i < t.length; i++) h = ((h << 5) + h + t.charCodeAt(i)) | 0; };
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  let node;
+  while ((node = walker.nextNode()) && n < 20000) {
+    const t = node.nodeValue.trim(); if (!t) continue;
+    const parent = node.parentElement;
+    if (!parent || parent.closest('[data-qa-menu-root], script, style, noscript, template') || !shown(parent)) continue;
+    add(t);
+  }
+  let fields = 0;
+  for (const f of document.querySelectorAll('input:not([type=hidden]):not([type=password]), select, textarea')) {
+    if (fields >= 300) break;
+    if (f.closest('[data-qa-menu-root]') || !shown(f)) continue;
+    fields++; add('|' + (f.type === 'checkbox' || f.type === 'radio' ? (f.checked ? '1' : '0') : String(f.value || '').slice(0, 60)));
+  }
+  // which panels and tabs are shown also counts when their text happens to be equal. (Not aria-expanded or "open"
+  // classes: the menu's own trigger changes those when the menu closes, which says nothing about the option.)
+  for (const e of document.querySelectorAll('[role=tabpanel], [role=tab], .tab-pane')) { if (!e.closest('[data-qa-menu-root]')) add((e.id || '') + ':' + (shown(e) ? 1 : 0) + ':' + (e.getAttribute('aria-selected') || '')); }
+  const headings = Array.from(document.querySelectorAll('h1,h2,h3,h4,legend,[role=heading]')).filter((e) => !e.closest('[data-qa-menu-root]') && shown(e)).slice(0, 20)
+    .map((e) => (e.innerText || e.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 60)).filter(Boolean);
+  const r = el ? el.getBoundingClientRect() : null;
+  return {
+    found: !!el, active: !!el && (marked(el) || marked(el.parentElement)), sig: n + ':' + (h >>> 0).toString(36), url: location.href,
+    dialogs: Array.from(document.querySelectorAll('dialog[open],[role=dialog],[role=alertdialog],[aria-modal=true]')).filter(shown).length,
+    heading: headings.join(' | '), headings,
+    box: r && r.width > 0 ? { x: r.x, y: r.y, width: r.width, height: r.height } : null,
+  };
+})`;
+
+const viewOf = (c: BrowserController, o: MenuOption): Promise<OptionView | null> =>
+  (c.page.evaluate(`${OPTION_VIEW_SCRIPT}(${JSON.stringify(o.id)}, ${JSON.stringify(o.label)}, ${JSON.stringify(o.href ?? '')})`) as Promise<OptionView>).catch(() => null);
+
+const REOPEN_SCRIPT = `((label) => {
+  const all = Array.from(document.querySelectorAll('button, a, [role=button], [data-toggle=dropdown], [data-bs-toggle=dropdown], [aria-haspopup], summary'));
+  const trigger = all.find((e) => { const t = (e.innerText || e.textContent || e.getAttribute('aria-label') || '').trim(); return t === label || t.startsWith(label); });
+  if (!trigger || trigger.getAttribute('aria-expanded') === 'true') return false;
+  if (trigger.scrollIntoViewIfNeeded) trigger.scrollIntoViewIfNeeded(); else trigger.scrollIntoView({ block: 'nearest' });
+  const opts = { bubbles: true, cancelable: true, view: window };
+  trigger.dispatchEvent(new MouseEvent('pointerdown', opts));
+  trigger.dispatchEvent(new MouseEvent('mousedown', opts));
+  trigger.dispatchEvent(new MouseEvent('pointerup', opts));
+  trigger.dispatchEvent(new MouseEvent('mouseup', opts));
+  trigger.click();
+  return true;
+})`;
+
+/** Selecting one option usually closes the menu: open it again (through its trigger) when the next option is not on screen. */
+async function ensureOptionVisible(ctx: FunctionalContext, opt: MenuOption, triggerLabel: string, remark?: () => Promise<void>): Promise<void> {
+  const c = ctx.controller;
+  const open = await c.page.evaluate(`((id, label) => {
+    const vis = (e) => { if (!e) return false; const r = e.getBoundingClientRect(); if (r.width < 2 || r.height < 2) return false; const s = getComputedStyle(e); return s.visibility !== 'hidden' && s.display !== 'none'; };
+    const called = (e) => !!e && (e.getAttribute('aria-label') || e.innerText || e.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 60) === label;
+    // the option itself is on screen (a mark with the same id on another menu's item does not count)
+    if ([document.querySelector('[data-qa-menu-opt="' + id + '"]'), document.querySelector('[data-qa-opt="' + id + '"]')].some((e) => called(e) && vis(e))) return true;
+    return Array.from(document.querySelectorAll('a, button, [role=menuitem], [role=menuitemradio], [role=option], .dropdown-item, .menu-item')).some((e) => called(e) && vis(e));
+  })(${JSON.stringify(opt.id)}, ${JSON.stringify(opt.label)})`).catch(() => false);
+  if (open) return;
+  if (!triggerLabel) return;
+  await c.page.evaluate(`${REOPEN_SCRIPT}(${JSON.stringify(triggerLabel)})`).catch(() => false);
+  await c.settle(150);
+  await remark?.();
+}
+
+/** What is left unexplored, and why, is said: a limit that was reached must not read as complete coverage. */
+function notExplored(ctx: FunctionalContext, where: string, reason: string, labels: string[]): void {
+  if (labels.length === 0) return;
+  ctx.onAction?.({ type: 'not-explored', target: where, ok: false, detail: `NOT EXPLORED (${reason}): ${[...new Set(labels)].slice(0, 20).join(', ')}${labels.length > 20 ? `, and ${labels.length - 20} more` : ''}` });
+}
+
+/**
+ * ONE option of an open menu: a recorded action of its own, with its own verification. Seeing the option in the menu proves
+ * nothing about it, and neither does a click that did not throw. It passes when selecting it is SEEN to do something
+ * outside the menu (content, form values, shown panels, a dialog, the address) or to become the marked choice; an option
+ * that is already the marked choice and changes nothing is verified as that. Anything else is inconclusive, never a pass.
+ */
+async function exerciseOption(
+  ctx: FunctionalContext, push: (r: FunctionalResult) => void, run: Run,
+  a: { opt: MenuOption; menu: string; target: string; ensureOpen: () => Promise<void> },
+): Promise<{ verified: boolean; changed: boolean; stopped?: boolean; pre: OptionView | null }> {
+  const c = ctx.controller;
+  const { opt } = a;
+  const ref = { selector: a.target, name: opt.label };
+  const expected = `Selecting "${opt.label}" in "${a.menu}" shows its view or changes what is selected`;
+  await a.ensureOpen();
+  if (!ctx.budget.consume()) { run.done.delete(optionKey(opt)); return { verified: false, changed: false, stopped: true, pre: null }; }
+  const pre = await viewOf(c, opt);
+  const box = pre?.box ? { ...pre.box, vpWidth: c.viewport.width, vpHeight: c.viewport.height } : null;
+  const before = await c.page.screenshot({ type: 'jpeg', quality: 65 }).catch(() => undefined);
+  ctx.onAction?.({ phase: 'TARGETED', type: 'disclosure-option', target: a.target, ok: true, box, buffer: before, expected });
+  ctx.onAction?.({ phase: 'CLICKING', type: 'click', target: a.target, ok: true, box, buffer: before });
+  c.beginAction();
+  const clicked = (await c.page.evaluate(`${CLICK_OPTION_SCRIPT}(${JSON.stringify(opt.id)}, ${JSON.stringify(opt.label)}, ${JSON.stringify(opt.href ?? '')})`).catch((e) => ({ ok: false, error: String(e) }))) as { ok: boolean; error?: string };
+  await c.settle(250); await c.waitForIdle(2000);
+  const post = await viewOf(c, opt);
+  const after = await c.page.screenshot({ type: 'jpeg', quality: 65 }).catch(() => undefined);
+
+  const changes: string[] = [];
+  if (pre && post) {
+    if (post.url !== pre.url) changes.push(`the address changed (${c.redactor.redactUrl(pre.url)} -> ${c.redactor.redactUrl(post.url)})`);
+    const shownNow = post.headings.find((h) => !pre.headings.includes(h));
+    if (post.sig !== pre.sig) changes.push(`the content shown outside the menu changed${shownNow ? ` (now showing "${shownNow}")` : ''}`);
+    if (post.dialogs > pre.dialogs) changes.push('a dialog opened');
+    if (!pre.active && post.active) changes.push(`"${opt.label}" is now marked as the selected choice`);
+  }
+  const proof = { before, screenshot: after, trace: { action: `select "${opt.label}" in "${a.menu}"`, urlBefore: pre?.url, urlAfter: post?.url, network: [], console: [], changes: changes.length > 0 ? changes : ['nothing changed outside the menu'] } };
+
+  let status: 'pass' | 'inconclusive'; let actual: string; let confidence: 'HIGH' | 'MEDIUM' | 'LOW';
+  if (!clicked.ok || !pre || !post) {
+    status = 'inconclusive'; confidence = 'LOW';
+    actual = `Option "${opt.label}" could not be selected: ${clicked.error || 'the page could not be read before and after'}`;
+  } else if (changes.length > 0) {
+    status = 'pass'; confidence = 'HIGH';
+    actual = `Option "${opt.label}" was selected in "${a.menu}": ${changes.join('; ')}`;
+  } else if (pre.active) {
+    status = 'pass'; confidence = 'MEDIUM';
+    actual = `Option "${opt.label}" is already the selected choice in "${a.menu}" (it is marked active): selecting it again changed nothing, as expected`;
+  } else {
+    status = 'inconclusive'; confidence = 'LOW';
+    actual = `Option "${opt.label}" was clicked in "${a.menu}", but nothing could be verified to change: not the content, a selection, a dialog or the address`;
+  }
+  push({ ...BASE, check: 'disclosure-option', status, severity: 'info', basis: null, element: ref, expected, actual, confidence, ...proof });
+  ctx.onAction?.({ phase: 'RESULT', type: 'disclosure-option', target: a.target, ok: status === 'pass', verdict: status === 'pass' ? 'PASS' : 'NEEDS_REVIEW', confidence, expected, actual, buffer: after });
+  if (status === 'pass') await inspectCurrentUI(ctx, a.target, push);
+  return { verified: status === 'pass', changed: changes.length > 0, pre };
+}
+
+/**
+ * After options were selected, the view may be another one than the menu was opened in. It is brought back by selecting
+ * again the option that shows it: the one that was marked as the choice at the start, or the one the view's heading names.
+ * Nothing is guessed and no other option is selected a second time; when no option is known to lead back, the caller
+ * reloads the page instead.
+ */
+async function restoreViewByOptions(ctx: FunctionalContext, exercised: Exercised[], home: { sig: string; heading: string }, ensureOpen: (o: MenuOption) => Promise<void>): Promise<'unchanged' | 'restored' | 'failed'> {
+  const c = ctx.controller;
+  const probe = exercised[0]!.opt;
+  await ensureOpen(probe);
+  if ((await viewOf(c, probe))?.sig === home.sig) return 'unchanged';
+  const names = (o: MenuOption): boolean => o.label.length > 2 && home.heading.toLowerCase().includes(o.label.toLowerCase());
+  const candidates = [...exercised.filter((x) => x.wasActive), ...exercised.filter((x) => !x.wasActive && names(x.opt))].slice(0, 2);
+  if (candidates.length === 0) return 'unchanged'; // its options act on the view (sort, layout, filter); they do not switch between views
+  for (const { opt } of candidates) {
+    if (ctx.budget.exhausted) return 'failed';
+    await ensureOpen(opt);
+    await c.page.evaluate(`${CLICK_OPTION_SCRIPT}(${JSON.stringify(opt.id)}, ${JSON.stringify(opt.label)}, ${JSON.stringify(opt.href ?? '')})`).catch(() => null);
+    await c.settle(250); await c.waitForIdle(2000);
+    if ((await viewOf(c, opt))?.sig === home.sig) return 'restored';
+  }
+  return 'failed';
+}
 
 /**
  * Explores the state the revealed UI is in now. `path` is how it was reached (for the record). Returns false when the UI
@@ -266,8 +578,11 @@ export async function exploreState(ctx: FunctionalContext, push: (r: FunctionalR
   const { controller: c, guard } = ctx;
   const here = await snapshotState(c);
   if (!here || here.controls === 0) return true;
-  if (run.visited.has(here.fingerprint) || run.visited.size >= run.limits.maxStates) return true; // seen before, or the bound is reached
-  run.visited.add(here.fingerprint);
+  // A state is its controls AND what it shows: two sections with the same kinds of controls are not the same state.
+  const stateKey = `${here.fingerprint}|${here.content}`;
+  if (run.visited.has(stateKey)) return true; // seen before
+  if (run.visited.size >= run.limits.maxStates) { notExplored(ctx, path.join(' > '), `the limit of ${run.limits.maxStates} UI states per entry was reached`, [`the view reached through "${path[path.length - 1] ?? ''}" (${here.controls} control(s))`]); return true; }
+  run.visited.add(stateKey);
   const where = path.join(' > ');
   run.states.push(`${where} [${here.controls} control(s)${here.active.length ? `; active: ${here.active.join(', ')}` : ''}${here.headings[0] ? `; "${here.headings[0]}"` : ''}]`);
   ctx.onAction?.({ type: 'state', target: where, ok: true, detail: `state ${run.visited.size}: ${here.controls} control(s), ${here.navigators.length} state-changing control(s)${here.active.length ? `, active: ${here.active.join(', ')}` : ''}` });
@@ -286,10 +601,16 @@ export async function exploreState(ctx: FunctionalContext, push: (r: FunctionalR
     const word = (s) => (/^(\\S\\s)+\\S$/.test(s) ? s.replace(/\\s/g, '') : s);
     const labelOf = (el) => word(el.getAttribute('aria-label') || text(el) || el.getAttribute('title') || el.getAttribute('value') || '').slice(0, 60);
     const MENU_SEL = '.dropdown-menu, .menu, [role=menu], [role=listbox], .popover, .dropdown-content, .select-options';
-    const menus = Array.from(document.querySelectorAll(MENU_SEL)).filter((m) => visible(m) && !m.closest('[role=tablist], .tabs, .nav-tabs'));
+    const named = Array.from(document.querySelectorAll(MENU_SEL)).filter((m) => visible(m) && !m.closest('[role=tablist], .tabs, .nav-tabs'));
+    // A list that was not on screen before the interaction and is now: a submenu, whatever its markup. Many applications
+    // build menus from plain <ul><li><a> with no class or role that says "menu".
+    const root = window.__qaRootSeen;
+    const revealed = root ? Array.from(document.querySelectorAll('ul, ol, menu')).filter((l) => visible(l) && !root.has(l) && !l.closest('[role=tablist], .tabs, .nav-tabs')) : [];
+    const menus = Array.from(new Set(named.concat(revealed)));
     const OPT_SEL = 'a, button, [role=menuitem], [role=menuitemradio], [role=menuitemcheckbox], [role=option], .dropdown-item, .menu-item';
     const out = [];
     const seen = new Set();
+    const batch = 'menu_' + Date.now().toString(36) + '_'; // marks of an earlier look at the menu stay valid for the loop that made them
     for (const m of menus) {
       for (const item of m.querySelectorAll(OPT_SEL)) {
         if (!visible(item) || item.disabled || item.getAttribute('aria-disabled') === 'true' || seen.has(item)) continue;
@@ -297,127 +618,65 @@ export async function exploreState(ctx: FunctionalContext, push: (r: FunctionalR
         const l = labelOf(item);
         if (!l || /^(close|cancel|dismiss)$/i.test(l)) continue;
         seen.add(item);
-        const optId = 'menu_opt_' + out.length;
+        const optId = batch + out.length;
         item.setAttribute('data-qa-menu-opt', optId);
-        out.push({ id: optId, label: l });
+        const link = item.tagName === 'A';
+        out.push({ id: optId, label: l, href: link ? item.getAttribute('href') : null, url: link ? item.href : null });
+        if (out.length >= 60) return out;
       }
     }
     return out;
-  })()`).catch(() => [])) as { id: string; label: string }[];
+  })()`).catch(() => [])) as MenuOption[];
 
-  const safeMenuOpts = openMenuOptions.filter((o) => guard.check({ kind: 'click', name: o.label, text: o.label }).allowed);
+  const safeMenuOpts = openMenuOptions.filter((o) => guard.check({ kind: 'click', name: o.label, text: o.label, ...(destinationOf(o, c.page.url()) ? { href: o.url ?? undefined } : {}) }).allowed);
+  const exercised: Exercised[] = []; let homeView: { sig: string; heading: string } | undefined;
   for (const opt of safeMenuOpts) {
     if (ctx.budget.exhausted) break;
-    const optRef = { selector: `${where} > ${opt.label}`, name: opt.label };
-    const optExpected = `Option "${opt.label}" in "${where}" is selected and UI state updates`;
-
-    // Ensure menu is open if it closed from a previous option click
-    const isMenuOpen = await c.page.evaluate(`(() => {
-      const visible = (el) => { if (!el) return false; const r = el.getBoundingClientRect(); if (r.width < 2 || r.height < 2) return false; const s = getComputedStyle(el); return s.visibility !== 'hidden' && s.display !== 'none' && Number(s.opacity || '1') > 0.05; };
-      return Array.from(document.querySelectorAll('.dropdown-menu, .menu, [role=menu], [role=listbox], .popover')).some(visible);
-    })()`).catch(() => false);
-
-    if (!isMenuOpen) {
-      await c.page.evaluate(`((lastLabel) => {
-        const btn = Array.from(document.querySelectorAll('button, a, [role=button], [data-toggle=dropdown], [aria-haspopup]')).find(e => {
-          const t = (e.innerText || e.textContent || e.getAttribute('aria-label') || '').trim();
-          return t === lastLabel || t.startsWith(lastLabel);
-        });
-        if (btn && btn.getAttribute('aria-expanded') !== 'true') btn.click();
-      })(${JSON.stringify(path[path.length - 1] ?? '')})`).catch(() => undefined);
-      await c.settle(150);
+    // an option is gone through once per exploration, however many ways lead to the menu it is in
+    if (run.done.has(optionKey(opt))) continue;
+    run.done.add(optionKey(opt));
+    const dest = destinationOf(opt, c.page.url());
+    if (dest) {
+      if (!(await followMenuLink(ctx, push, run, where, opt, dest))) return false;
+      continue;
     }
-
-    if (!ctx.budget.consume()) break;
-    const optRawBox = (await c.page.evaluate(`((optId, optLabel) => {
-      let el = document.querySelector('[data-qa-menu-opt="' + optId + '"]') || document.querySelector('[data-qa-opt="' + optId + '"]');
-      if (!el) {
-        const all = Array.from(document.querySelectorAll('a, button, [role=menuitem], [role=option], .dropdown-item, .menu-item, li'));
-        el = all.find(e => {
-          const t = (e.innerText || e.textContent || e.getAttribute('aria-label') || '').trim();
-          return t === optLabel || t.startsWith(optLabel);
-        });
-      }
-      if (!el) return null;
-      const r = el.getBoundingClientRect();
-      return { x: r.x, y: r.y, width: r.width, height: r.height };
-    })(${JSON.stringify(opt.id)}, ${JSON.stringify(opt.label)})`).catch(() => null)) as { x: number; y: number; width: number; height: number } | null;
-    const optBox = optRawBox ? { ...optRawBox, vpWidth: c.viewport.width, vpHeight: c.viewport.height } : null;
-
-    const optBeforeShot = await c.page.screenshot({ type: 'jpeg', quality: 65 }).catch(() => undefined);
-    ctx.onAction?.({
-      phase: 'TARGETED',
-      type: 'disclosure-option',
-      target: `${where} > ${opt.label}`,
-      ok: true,
-      box: optBox,
-      buffer: optBeforeShot,
-      expected: optExpected,
+    const done = await exerciseOption(ctx, push, run, {
+      opt, menu: where, target: `${where} > ${opt.label}`,
+      ensureOpen: () => ensureOptionVisible(ctx, opt, path[path.length - 1] ?? ''),
     });
-    ctx.onAction?.({
-      phase: 'CLICKING',
-      type: 'click',
-      target: `${where} > ${opt.label}`,
-      ok: true,
-      box: optBox,
-      buffer: optBeforeShot,
-    });
-    await new Promise((r) => setTimeout(r, 50));
-    const clickedOpt = (await c.page.evaluate(`((optId, optLabel) => {
-      let el = document.querySelector('[data-qa-menu-opt="' + optId + '"]') || document.querySelector('[data-qa-opt="' + optId + '"]');
-      if (!el) {
-        const all = Array.from(document.querySelectorAll('a, button, [role=menuitem], [role=option], .dropdown-item, .menu-item, li'));
-        el = all.find(e => {
-          const t = (e.innerText || e.textContent || e.getAttribute('aria-label') || '').trim();
-          return t === optLabel || t.startsWith(optLabel);
-        });
-      }
-      if (!el) return { ok: false, error: 'Option element not found' };
-      if (el.scrollIntoViewIfNeeded) el.scrollIntoViewIfNeeded(); else el.scrollIntoView({ block: 'nearest' });
-      const opts = { bubbles: true, cancelable: true, view: window };
-      el.dispatchEvent(new MouseEvent('pointerdown', opts));
-      el.dispatchEvent(new MouseEvent('mousedown', opts));
-      el.dispatchEvent(new MouseEvent('pointerup', opts));
-      el.dispatchEvent(new MouseEvent('mouseup', opts));
-      el.click();
-      return { ok: true };
-    })(${JSON.stringify(opt.id)}, ${JSON.stringify(opt.label)})`).catch((e) => ({ ok: false, error: String(e) }))) as { ok: boolean; error?: string };
-
-    await c.settle(250); await c.waitForIdle(2000);
-    const optPost = await snapshotState(c);
-    const optPostShot = await c.page.screenshot({ type: 'jpeg', quality: 65 }).catch(() => undefined);
-    const optProof = { before: optBeforeShot, screenshot: optPostShot, trace: { action: `click option "${opt.label}" in "${where}"`, network: [], console: [], changes: [`controls: ${optPost?.controls ?? 0}`] } };
-
-    if (clickedOpt.ok) {
-      const optActual = `Option "${opt.label}" was selected in "${where}" (${optPost?.controls ?? 0} control(s) present)`;
-      push({ ...BASE, check: 'disclosure-option', status: 'pass', severity: 'info', basis: null, element: optRef, expected: optExpected, actual: optActual, confidence: 'HIGH', ...optProof });
-      ctx.onAction?.({
-        phase: 'RESULT',
-        type: 'disclosure-option',
-        target: `${where} > ${opt.label}`,
-        ok: true,
-        verdict: 'PASS',
-        confidence: 'HIGH',
-        expected: optExpected,
-        actual: optActual,
-        buffer: optPostShot,
-      });
-      await inspectCurrentUI(ctx, `${where} > ${opt.label}`, push);
-      if (optPost && optPost.fingerprint !== here.fingerprint) {
-        await exploreState(ctx, push, run, [...path, opt.label], depth + 1, inherited);
-      }
-    } else {
-      const optActual = `Option "${opt.label}" could not be selected: ${clickedOpt.error || 'element not found'}`;
-      push({ ...BASE, check: 'disclosure-option', status: 'inconclusive', severity: 'info', basis: null, element: optRef, expected: optExpected, actual: optActual, confidence: 'LOW', ...optProof });
+    if (done.stopped) break;
+    exercised.push({ opt, wasActive: !!done.pre?.active });
+    if (!homeView && done.pre) homeView = { sig: done.pre.sig, heading: done.pre.heading };
+    if (done.verified && done.changed) await exploreState(ctx, push, run, [...path, opt.label], depth + 1, inherited);
+  }
+  {
+    const waiting = safeMenuOpts.filter((o) => !run.done.has(optionKey(o)));
+    if (waiting.length > 0) notExplored(ctx, where, ctx.budget.timedOut ? "this page's share of the run time was used up" : 'the action budget was used up', waiting.map((o) => o.label));
+    if (homeView && exercised.length > 0) {
+      const back = await restoreViewByOptions(ctx, exercised, homeView, (o) => ensureOptionVisible(ctx, o, path[path.length - 1] ?? ''));
+      if (back !== 'unchanged') ctx.onAction?.({ type: 'restore', target: where, ok: back === 'restored', detail: back === 'restored' ? 'the view this menu was opened in was shown again by selecting its option' : 'no option of this menu brings back the view it was opened in' });
     }
   }
 
-  if (depth >= run.limits.maxDepth || ctx.budget.exhausted) return true;
+  {
+    // What this state contains but nothing here operates: plain buttons and links inside an opened view are left as found
+    // (they may save, submit or confirm). They are named, so the record does not read as if everything was exercised.
+    const handled = new Set([...here.navigators.map((n) => n.label), ...openMenuOptions.map((o) => o.label)]);
+    const left = here.options.filter((l) => !handled.has(l));
+    if (left.length > 0) ctx.onAction?.({ type: 'state-coverage', target: where, ok: true, detail: `${here.controls} control(s) in this view. Reversible controls (fields, selects, toggles, tabs) and menus are exercised; left as found (plain buttons and links, which may save or submit): ${left.slice(0, 15).join(', ')}${left.length > 15 ? `, and ${left.length - 15} more` : ''}` });
+  }
+  if (depth >= run.limits.maxDepth || ctx.budget.exhausted) {
+    const next = here.navigators.filter((n) => !known.has(key(n)) && ((n.kind === 'tab' && !n.active) || (n.kind === 'disclosure' && !n.expanded)));
+    notExplored(ctx, where, ctx.budget.exhausted ? (ctx.budget.timedOut ? "this page's share of the run time was used up" : 'the action budget was used up') : `the nesting limit of ${run.limits.maxDepth} levels was reached`, next.map((n) => n.label));
+    return true;
+  }
 
   // 2. the controls that lead to other states. next/back belong to a wizard, which only the creation workflow drives.
   // Only what is NEW in this state is followed from here: the sibling tabs and menus of the state it was reached from
   // belong to that state and are followed there. That keeps the exploration a tree instead of every path between tabs.
-  const targets = here.navigators.filter((n) => !known.has(key(n)) && ((n.kind === 'tab' && !n.active) || (n.kind === 'disclosure' && !n.expanded))).slice(0, run.limits.maxNavigatorsPerState);
+  // an option that was already selected as an option of its menu is not followed again as if it opened something
+  const selected = new Set([...run.done].map((k) => k.split('|')[0]));
+  const targets = here.navigators.filter((n) => !known.has(key(n)) && !(n.kind === 'disclosure' && selected.has(n.label)) && ((n.kind === 'tab' && !n.active) || (n.kind === 'disclosure' && !n.expanded))).slice(0, run.limits.maxNavigatorsPerState);
   for (const want of targets) {
     if (ctx.budget.exhausted || run.visited.size >= run.limits.maxStates) break;
     const now = await snapshotState(c); // marks are refreshed: the DOM may have been re-rendered since
@@ -508,8 +767,8 @@ export async function exploreState(ctx: FunctionalContext, push: (r: FunctionalR
       const isOpen = landed?.expanded || hasFresh || after.controls > now.controls;
       if (isOpen) {
         entered = true;
-        const discoveredOptions = (await c.page.evaluate(`${DISCLOSURE_OPTIONS_SCRIPT}(${JSON.stringify(MARK)}, ${JSON.stringify(nav.id)})`).catch(() => [])) as { id: string; label: string }[];
-        const optionList = discoveredOptions.length > 0 ? discoveredOptions : fresh.map((l, i) => ({ id: `fresh_${i}`, label: l }));
+        const discoveredOptions = (await c.page.evaluate(`${DISCLOSURE_OPTIONS_SCRIPT}(${JSON.stringify(MARK)}, ${JSON.stringify(nav.id)})`).catch(() => [])) as MenuOption[];
+        const optionList: MenuOption[] = discoveredOptions.length > 0 ? discoveredOptions : fresh.map((l, i) => ({ id: `fresh_${i}`, label: l }));
         const refused = optionList.filter((o) => !guard.check({ kind: 'click', name: o.label, text: o.label }).allowed);
         const safe = optionList.filter((o) => guard.check({ kind: 'click', name: o.label, text: o.label }).allowed);
 
@@ -517,124 +776,35 @@ export async function exploreState(ctx: FunctionalContext, push: (r: FunctionalR
         push({ ...BASE, check: 'disclosure-open', status: 'pass', severity: 'info', basis: null, element: ref, expected, confidence: 'HIGH', actual: actualMsg, ...proof });
 
         // Enumerate and exercise every safe non-destructive option
+        const exercised: Exercised[] = []; let homeView: { sig: string; heading: string } | undefined;
         for (const opt of safe) {
           if (ctx.budget.exhausted) break;
-          const optRef = { selector: `${where} > ${nav.label} > ${opt.label}`, name: opt.label };
-          const optExpected = `Option "${opt.label}" in "${nav.label}" is selected and UI state updates`;
-
-          // Re-ensure parent disclosure is open if it closed from a previous option click
-          const isOpenNow = await c.page.evaluate(`((navLabel) => {
-            const visible = (el) => { if (!el) return false; const r = el.getBoundingClientRect(); if (r.width < 2 || r.height < 2) return false; const s = getComputedStyle(el); return s.visibility !== 'hidden' && s.display !== 'none' && Number(s.opacity || '1') > 0.05; };
-            const anyOpen = Array.from(document.querySelectorAll('.dropdown-menu.show, .dropdown-menu.open, .menu.show, .menu.open, [role=menu], [role=listbox]')).some(visible);
-            if (anyOpen) return true;
-            const all = Array.from(document.querySelectorAll('button, a, [role=button], [data-toggle=dropdown], [data-bs-toggle=dropdown], [aria-haspopup], summary'));
-            const trigger = all.find(e => {
-              const t = (e.innerText || e.textContent || e.getAttribute('aria-label') || '').trim();
-              return t === navLabel || t.startsWith(navLabel);
-            });
-            if (trigger) {
-              if (trigger.getAttribute('aria-expanded') === 'true') return true;
-              if (trigger.scrollIntoViewIfNeeded) trigger.scrollIntoViewIfNeeded(); else trigger.scrollIntoView({ block: 'nearest' });
-              const opts = { bubbles: true, cancelable: true, view: window };
-              trigger.dispatchEvent(new MouseEvent('pointerdown', opts));
-              trigger.dispatchEvent(new MouseEvent('mousedown', opts));
-              trigger.dispatchEvent(new MouseEvent('pointerup', opts));
-              trigger.dispatchEvent(new MouseEvent('mouseup', opts));
-              trigger.click();
-              return false;
-            }
-            return false;
-          })(${JSON.stringify(nav.label)})`).catch(() => false);
-
-          if (!isOpenNow) {
-            await c.settle(150);
+          // already gone through when this menu was first seen open: not a second time
+          if (run.done.has(optionKey(opt))) continue;
+          run.done.add(optionKey(opt));
+          const dest = destinationOf(opt, c.page.url());
+          if (dest) {
+            if (!(await followMenuLink(ctx, push, run, `${where} > ${nav.label}`, opt, dest))) return false;
+            continue;
           }
-          await c.page.evaluate(`${DISCLOSURE_OPTIONS_SCRIPT}(${JSON.stringify(MARK)}, ${JSON.stringify(nav.id)})`).catch(() => []);
-
-          if (!ctx.budget.consume()) break;
-          const optRawBox = (await c.page.evaluate(`((optId, optLabel) => {
-            let el = document.querySelector('[data-qa-opt="' + optId + '"]') || document.querySelector('[data-qa-menu-opt="' + optId + '"]');
-            if (!el) {
-              const all = Array.from(document.querySelectorAll('a, button, [role=menuitem], [role=option], .dropdown-item, .menu-item, li'));
-              el = all.find(e => {
-                const t = (e.innerText || e.textContent || e.getAttribute('aria-label') || '').trim();
-                return t === optLabel || t.startsWith(optLabel);
-              });
-            }
-            if (!el) return null;
-            const r = el.getBoundingClientRect();
-            return { x: r.x, y: r.y, width: r.width, height: r.height };
-          })(${JSON.stringify(opt.id)}, ${JSON.stringify(opt.label)})`).catch(() => null)) as { x: number; y: number; width: number; height: number } | null;
-          const optBox = optRawBox ? { ...optRawBox, vpWidth: c.viewport.width, vpHeight: c.viewport.height } : null;
-
-          const optBeforeShot = await c.page.screenshot({ type: 'jpeg', quality: 65 }).catch(() => undefined);
-
-          ctx.onAction?.({
-            phase: 'TARGETED',
-            type: 'disclosure-option',
-            target: `${nav.label} > ${opt.label}`,
-            ok: true,
-            box: optBox,
-            buffer: optBeforeShot,
-            expected: optExpected,
+          const done = await exerciseOption(ctx, push, run, {
+            opt, menu: nav.label, target: `${where} > ${nav.label} > ${opt.label}`,
+            ensureOpen: () => ensureOptionVisible(ctx, opt, nav.label, async () => { await c.page.evaluate(`${DISCLOSURE_OPTIONS_SCRIPT}(${JSON.stringify(MARK)}, ${JSON.stringify(nav.id)})`).catch(() => []); }),
           });
-          ctx.onAction?.({
-            phase: 'CLICKING',
-            type: 'click',
-            target: `${nav.label} > ${opt.label}`,
-            ok: true,
-            box: optBox,
-            buffer: optBeforeShot,
-          });
-          await new Promise((r) => setTimeout(r, 50));
-
-          const clickedOpt = (await c.page.evaluate(`((optId, optLabel) => {
-            let el = document.querySelector('[data-qa-opt="' + optId + '"]') || document.querySelector('[data-qa-menu-opt="' + optId + '"]');
-            if (!el) {
-              const all = Array.from(document.querySelectorAll('a, button, [role=menuitem], [role=option], .dropdown-item, .menu-item, li'));
-              el = all.find(e => {
-                const t = (e.innerText || e.textContent || e.getAttribute('aria-label') || '').trim();
-                return t === optLabel || t.startsWith(optLabel);
-              });
-            }
-            if (!el) return { ok: false, error: 'Option element not found' };
-            if (el.scrollIntoViewIfNeeded) el.scrollIntoViewIfNeeded(); else el.scrollIntoView({ block: 'nearest' });
-            const opts = { bubbles: true, cancelable: true, view: window };
-            el.dispatchEvent(new MouseEvent('pointerdown', opts));
-            el.dispatchEvent(new MouseEvent('mousedown', opts));
-            el.dispatchEvent(new MouseEvent('pointerup', opts));
-            el.dispatchEvent(new MouseEvent('mouseup', opts));
-            el.click();
-            return { ok: true };
-          })(${JSON.stringify(opt.id)}, ${JSON.stringify(opt.label)})`).catch((e) => ({ ok: false, error: String(e) }))) as { ok: boolean; error?: string };
-
-          await c.settle(250); await c.waitForIdle(2000);
-          const optPost = await snapshotState(c);
-          const optPostShot = await c.page.screenshot({ type: 'jpeg', quality: 65 }).catch(() => undefined);
-          const optProof = { before: optBeforeShot, screenshot: optPostShot, trace: { action: `click option "${opt.label}" in "${nav.label}"`, network: [], console: [], changes: [`controls: ${optPost?.controls ?? 0}`] } };
-
-          if (clickedOpt.ok) {
-            const optActual = `Option "${opt.label}" was selected in "${nav.label}" (${optPost?.controls ?? 0} control(s) present)`;
-            push({ ...BASE, check: 'disclosure-option', status: 'pass', severity: 'info', basis: null, element: optRef, expected: optExpected, actual: optActual, confidence: 'HIGH', ...optProof });
-            ctx.onAction?.({
-              phase: 'RESULT',
-              type: 'disclosure-option',
-              target: `${nav.label} > ${opt.label}`,
-              ok: true,
-              verdict: 'PASS',
-              confidence: 'HIGH',
-              expected: optExpected,
-              actual: optActual,
-              buffer: optPostShot,
-            });
-            await inspectCurrentUI(ctx, `${nav.label} > ${opt.label}`, push);
-            if (optPost && optPost.fingerprint !== now.fingerprint) {
-              await exploreState(ctx, push, run, [...path, nav.label, opt.label], depth + 1, inherited);
-            }
-          } else {
-            const optActual = `Option "${opt.label}" could not be selected: ${clickedOpt.error || 'element not found'}`;
-            push({ ...BASE, check: 'disclosure-option', status: 'inconclusive', severity: 'info', basis: null, element: optRef, expected: optExpected, actual: optActual, confidence: 'LOW', ...optProof });
-          }
+          if (done.stopped) break;
+          exercised.push({ opt, wasActive: !!done.pre?.active });
+          if (!homeView && done.pre) homeView = { sig: done.pre.sig, heading: done.pre.heading };
+          // The option was verified to change the view: what it shows is a state of its own, explored like any other
+          // (its controls tested, its own menus and tabs followed), whether or not its controls look like another view's.
+          if (done.verified && done.changed) await exploreState(ctx, push, run, [...path, nav.label, opt.label], depth + 1, inherited);
+        }
+        const waiting = safe.filter((o) => !run.done.has(optionKey(o)));
+        if (waiting.length > 0) notExplored(ctx, `${where} > ${nav.label}`, ctx.budget.timedOut ? "this page's share of the run time was used up" : 'the action budget was used up', waiting.map((o) => o.label));
+        // Selecting options moved the view away from the one this menu was opened in. Put it back by selecting again the
+        // option that shows that view, so the sibling controls of this state can still be explored.
+        if (homeView && exercised.length > 0) {
+          const back = await restoreViewByOptions(ctx, exercised, homeView, (o) => ensureOptionVisible(ctx, o, nav.label, async () => { await c.page.evaluate(`${DISCLOSURE_OPTIONS_SCRIPT}(${JSON.stringify(MARK)}, ${JSON.stringify(nav.id)})`).catch(() => []); }));
+          if (back !== 'unchanged') ctx.onAction?.({ type: 'restore', target: nav.label, ok: back === 'restored', detail: back === 'restored' ? `the view "${nav.label}" was opened in was shown again by selecting its option` : `no option of "${nav.label}" brings back the view it was opened in` });
         }
       } else {
         entered = false;

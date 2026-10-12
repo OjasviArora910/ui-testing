@@ -50,17 +50,20 @@ export function runCounts(db: QADatabase, runId: string): RunCounts {
   const testable = pages.filter((p) => p.model && (p.statusCode ?? 200) < 400);
   let notTestedElements = 0;
   for (const p of testable) {
-    // only a page that was started and not finished has elements left over; a finished page has none
-    if (p.testStatus === 'tested' || p.decision?.planned === undefined) continue;
+    // only a page that was started and not finished has elements left over; a finished page has none. A page that was
+    // cut off when its share of the run time ran out is "tested" only in part: what it did not reach is counted.
+    const partial = /^partially tested/.test(p.error ?? '');
+    if ((p.testStatus === 'tested' && !partial) || p.decision?.planned === undefined) continue;
     const done = results.filter((r) => r.page === p.url && r.scenario !== 'links').length;
     notTestedElements += Math.max(0, p.decision.planned - done);
   }
   return {
-    pagesCrawled: pages.length, pagesTested: pages.filter((p) => p.testStatus === 'tested').length,
+    // a route that was found but never opened (page limit) was not crawled
+    pagesCrawled: pages.filter((p) => !(p.testStatus === 'not_tested' && !p.model)).length, pagesTested: pages.filter((p) => p.testStatus === 'tested').length,
     elementsTested: results.length, passed: results.filter((r) => r.classification === 'EXPECTED').length, blocked: results.filter((r) => r.classification === 'BLOCKED_BY_SAFETY').length,
     inconclusive: results.filter((r) => r.classification === 'INCONCLUSIVE').length,
     bugs: problems.bugs, warnings: problems.warnings, needsReview: problems.needsReview,
-    notTestedPages: testable.filter((p) => p.testStatus !== 'tested').length, notTestedElements,
+    notTestedPages: testable.filter((p) => p.testStatus !== 'tested').length + pages.filter((p) => p.testStatus === 'not_tested' && !p.model).length, notTestedElements,
   };
 }
 

@@ -48,6 +48,25 @@ export function normalizeUrl(href: string, base: string, opts: NormalizeOptions 
   return u.toString();
 }
 
+/**
+ * A hash-routed application usually answers any path with the same shell, so `/orders/open` and `/#orders/open` show the
+ * same view. Returns the hash-route form of a path URL (and null for a URL that already has a route fragment, or is the
+ * root). Only meaningful on a site that is known to route by fragment.
+ */
+export function hashTwin(url: string): string | null {
+  let u: URL;
+  try { u = new URL(url); } catch { return null; }
+  if (u.hash.length > 1 || u.pathname === '/' || u.pathname === '') return null;
+  return `${u.origin}/${u.search}#${u.pathname.replace(/^\/+/, '')}`;
+}
+
+/** The same page of a run: equal after normalisation, route fragments kept. */
+export function samePage(a: string, b: string): boolean {
+  const n = (x: string): string | null => normalizeUrl(x, x, { hashRouted: true });
+  const na = n(a); const nb = n(b);
+  return !!na && !!nb && (na === nb || hashTwin(na) === nb || hashTwin(nb) === na);
+}
+
 export function sameOrigin(a: string, b: string): boolean {
   try { return new URL(a).origin === new URL(b).origin; } catch { return false; }
 }
@@ -71,8 +90,9 @@ export interface CrawlOptions {
  * `visited` and `queue` are exposed through onPage so callers can persist progress and resume.
  */
 export async function crawl(controller: BrowserController, opts: CrawlOptions): Promise<CrawledPage[]> {
-  // A start URL that is itself a hash route tells us the application routes by fragment.
-  const hashRouted = (() => { try { return isHashRoute(new URL(opts.startUrl).hash); } catch { return false; } })();
+  // A start URL that is itself a hash route tells us the application routes by fragment. So does landing on one: an
+  // application opened at "/" that sends the browser to "/#dashboard" routes by fragment just the same.
+  let hashRouted = (() => { try { return isHashRoute(new URL(opts.startUrl).hash); } catch { return false; } })();
   const start = normalizeUrl(opts.startUrl, opts.startUrl, { hashRouted });
   if (!start) throw new Error(`Cannot crawl invalid start URL: ${opts.startUrl}`);
   const visited = new Set<string>(opts.initial?.visited ?? []);
@@ -88,6 +108,11 @@ export async function crawl(controller: BrowserController, opts: CrawlOptions): 
 
     const nav = await controller.navigate(item.url);
     await controller.settle(150);
+    if (!hashRouted && nav.ok) {
+      // a single-page app routes after its document has loaded: give it a moment before reading where it ended up
+      await controller.waitForIdle(1500);
+      try { hashRouted = isHashRoute(new URL(controller.page.url()).hash); } catch { /* keep */ }
+    }
     const finalUrl = normalizeUrl(controller.page.url(), item.url, { hashRouted });
     const page: CrawledPage = { url: item.url, depth: item.depth, status: nav.status, model: null, outgoing: [] };
 
@@ -112,8 +137,13 @@ export async function crawl(controller: BrowserController, opts: CrawlOptions): 
           // a link to a position inside this same page is not another page
           const here = (() => { try { const t = new URL(l.href ?? '', controller.page.url()); const cur = new URL(controller.page.url()); return t.origin + t.pathname + t.search === cur.origin + cur.pathname + cur.search && !!anchors?.has(safeDecode(t.hash.replace(/^#/, ''))); } catch { return false; } })();
           if (here) continue;
-          const n = normalizeUrl(l.href ?? '', controller.page.url(), { hashRouted, anchors });
+          let n = normalizeUrl(l.href ?? '', controller.page.url(), { hashRouted, anchors });
           if (!n || !sameOrigin(n, start)) continue;
+          if (hashRouted) {
+            // "/orders/open" and "/#orders/open" are one view of a hash-routed application: one page, in its route form
+            const twin = hashTwin(n);
+            if (twin && (queued.has(twin) || visited.has(twin) || (page.model.links.some((x) => normalizeUrl(x.href ?? '', controller.page.url(), { hashRouted, anchors }) === twin)))) n = twin;
+          }
           if (opts.allowLink && !opts.allowLink({ href: n, text: l.name || l.text, selector: l.selector })) continue;
           page.outgoing.push(n);
           if (item.depth < opts.maxDepth && !queued.has(n)) { queued.add(n); queue.push({ url: n, depth: item.depth + 1 }); }

@@ -118,12 +118,27 @@ export async function auditStateWithScrolling(
   return confirmedFindings;
 }
 
+/**
+ * Identity of a layout defect within the page under test: the rule, the element and the measurement (numbers ignored, so
+ * a few pixels of difference between two looks at the same thing do not make it a new defect). Deliberately without the
+ * address or the UI state: opening a menu changes neither what is wrong nor where.
+ */
+export function defectKey(f: Pick<Finding, 'ruleId' | 'element' | 'actual'>): string {
+  return [f.ruleId, f.element?.selector ?? '', f.actual.replace(/\d+/g, '#').slice(0, 80)].join('|');
+}
+
 /** Runs generic UI/UX deterministic rules on the currently rendered UI state with bounded scrolling. */
 export async function inspectCurrentUI(ctx: FunctionalContext, label: string, push: (r: FunctionalResult) => void): Promise<void> {
   if (!ctx.config) return;
   try {
     const findings = await auditStateWithScrolling(ctx.controller, ctx.config, ctx.registry);
     for (const f of findings) {
+      // A defect is identified by what is wrong and where (rule, element, measurement), not by the interaction after which
+      // it was looked at. One that was already reported for this page is the same finding: the state is noted, nothing more.
+      const id = defectKey(f);
+      const again = ctx.auditSeen?.get(id);
+      if (again) { again.push(label); continue; }
+      ctx.auditSeen?.set(id, []);
       push({
         kind: 'interactive',
         check: f.ruleId,
@@ -132,8 +147,8 @@ export async function inspectCurrentUI(ctx: FunctionalContext, label: string, pu
         basis: f.basis,
         element: f.element,
         expected: f.expected,
-        actual: `In UI state after "${label}": ${f.actual}`,
-        details: { ...(f.context ?? {}), trigger: label, originalRuleId: f.ruleId },
+        actual: f.actual,
+        details: { ...(f.context ?? {}), reason: `${f.context?.why ? `${f.context.why} ` : ''}First seen in the UI state after "${label}".`, trigger: label, originalRuleId: f.ruleId },
         confidence: 'HIGH',
       });
     }

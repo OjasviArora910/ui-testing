@@ -174,7 +174,11 @@ describe('the verdict comes from the UI result, not from console errors or brows
       const page = (await (await buildRegistry(config)).run(await collectRuleContext(c, { config, network, console: cons }))).findings;
       expect(page.map((x) => `${x.ruleId}: ${x.actual}`)).toEqual([]);
       expect(r.filter(producesFinding)).toEqual([]);
-      expect(r.filter((x) => x.kind === 'button').every((x) => x.status === 'pass'), say(r.filter((x) => x.status !== 'pass'))).toBe(true);
+      // every control passes, except menu items that do nothing at all in this fixture: selecting one changes nothing that
+      // can be verified, so it is inconclusive (recorded, not reported), never a pass on the strength of the click alone
+      const notPassed = r.filter((x) => x.kind === 'button' && x.status !== 'pass');
+      expect(notPassed.every((x) => x.check === 'disclosure-option' && x.status === 'inconclusive'), say(notPassed)).toBe(true);
+      expect(notPassed.map((x) => x.element?.name).sort()).toEqual(['Rename']);
     });
 
     it('console and network diagnostics are not findings by default; switched on, a logged error is still never a defect', async () => {

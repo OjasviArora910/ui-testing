@@ -94,7 +94,16 @@ export class QADatabase {
       .run(runId, this.u(p.url), p.depth, p.statusCode ?? null, this.s(p.title), this.s(p.error), p.model ? this.j(p.model) : null, p.testStatus ?? 'pending', now());
   }
   setPageTested(runId: string, url: string, status: PageRecord['testStatus'] = 'tested'): void {
-    this.db.prepare('UPDATE pages SET test_status = ? WHERE run_id = ? AND url = ?').run(status, runId, this.u(url));
+    // a page that is tested after all (a resumed run) no longer carries the reason it was left out
+    this.db.prepare("UPDATE pages SET test_status = ?, error = CASE WHEN ? = 'tested' AND test_status = 'not_tested' THEN NULL ELSE error END WHERE run_id = ? AND url = ?").run(status, status, runId, this.u(url));
+  }
+  /** A page whose testing was cut short (its time share ran out): tested, but only in part. The note says why. */
+  setPagePartial(runId: string, url: string, note: string): void {
+    this.db.prepare('UPDATE pages SET error = ? WHERE run_id = ? AND url = ?').run(this.s(`partially tested: ${note}`), runId, this.u(url));
+  }
+  /** Every page that was still waiting is recorded as not tested, with the reason. Returns how many. */
+  markPendingNotTested(runId: string, reason: string): number {
+    return this.db.prepare("UPDATE pages SET test_status = 'not_tested', error = ? WHERE run_id = ? AND test_status = 'pending'").run(this.s(reason), runId).changes;
   }
   listPages(runId: string): PageRecord[] {
     return (this.db.prepare('SELECT * FROM pages WHERE run_id = ? ORDER BY id').all(runId) as Row[]).map((r) => ({

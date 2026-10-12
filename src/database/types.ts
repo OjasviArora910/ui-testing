@@ -92,7 +92,8 @@ export interface RunSummary {
 
 export interface PageRecord {
   id: number; runId: string; url: string; depth: number; statusCode: number | null; title: string | null; error: string | null;
-  testStatus: 'pending' | 'tested' | 'skipped'; model: unknown | null; discoveredAt: string;
+  /** `skipped`: could not be opened (error says why). `not_tested`: reachable, but the run ended or hit a limit first (error says which). */
+  testStatus: 'pending' | 'tested' | 'skipped' | 'not_tested'; model: unknown | null; discoveredAt: string;
   /** What was detected on the page and which tests were selected/skipped (dynamic selection). */
   decision: PageDecision | null;
   /** What happened while the page loaded: requests made, blocked, failed; whether its data arrived. */

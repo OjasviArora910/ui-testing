@@ -48,7 +48,7 @@ export async function runFunctionalTests(ctx: FunctionalContext): Promise<Functi
     if (r.status === 'anomaly' && !REVIEWABLE.has(r.check)) { r.status = 'inconclusive'; r.severity = 'info'; }
     ctx.onResult?.(r);
   };
-  const inner: FunctionalContext = { ...ctx, onResult: finalize };
+  const inner: FunctionalContext = { ...ctx, auditSeen: ctx.auditSeen ?? new Map<string, string[]>(), onResult: finalize };
   for (const [kind, suite] of suitesFor(ctx)) {
     if (ctx.budget.exhausted) break;
     try { out.push(...await suite(inner)); } catch (e) {

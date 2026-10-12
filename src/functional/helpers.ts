@@ -47,3 +47,30 @@ export function newLines(before: string[], after: string[]): string[] {
 }
 
 export const VALIDATION_TEXT = /(required|invalid|error|must|please|enter a|not valid|too short|too long|incorrect|cannot be empty|can't be blank)/i;
+
+/**
+ * What is shown right now, reduced to a comparable value: title, visible headings and the visible text. Used to tell that
+ * a navigation really brought up another view; an address that changed while the screen stayed the same is not one.
+ */
+export async function viewSignature(c: FunctionalContext['controller']): Promise<string> {
+  return (c.page.evaluate(`(() => {
+    const t = (e) => (e.innerText || e.textContent || '').replace(/\\s+/g, ' ').trim();
+    const hs = Array.from(document.querySelectorAll('h1,h2,h3,[role=heading]')).filter((e) => e.getClientRects().length > 0).map(t).join('|');
+    const b = document.body ? (document.body.innerText || '') : '';
+    let h = 5381; for (let i = 0; i < b.length; i++) h = ((h << 5) + h + b.charCodeAt(i)) | 0;
+    return document.title + '||' + hs + '||' + b.length + ':' + h;
+  })()`) as Promise<string>).catch(() => '');
+}
+
+/**
+ * The address still names the view the action started on: identical, or only the fragment was emptied. Activating a
+ * control written as <a href="#"> turns ".../#orders" into ".../#" without going anywhere; that is not a navigation.
+ */
+export function sameViewUrl(now: string, before: string | undefined): boolean {
+  if (!before) return false;
+  if (now === before) return true;
+  try {
+    const a = new URL(now); const b = new URL(before);
+    return a.origin === b.origin && a.pathname === b.pathname && a.search === b.search && (a.hash === b.hash || a.hash === '' || a.hash === '#');
+  } catch { return false; }
+}

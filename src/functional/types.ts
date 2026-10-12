@@ -269,7 +269,16 @@ export class ActionBudget {
   /** Set when the run is being stopped: every tester loop already checks the budget, so they all wind down at once. */
   halted = false;
   halt(): void { this.halted = true; }
-  get exhausted(): boolean { return this.halted || this.used >= this.max; }
+  /**
+   * When set, the page being tested has until then. Every tester loop already checks the budget, so when a page has used
+   * its share of the run time they all wind down, what was not reached is recorded as not run, and the next page starts.
+   */
+  private deadline = 0;
+  setDeadline(at: number): void { this.deadline = at; }
+  clearDeadline(): void { this.deadline = 0; }
+  /** The current page's time share is used up (the action budget itself may still have room). */
+  get timedOut(): boolean { return this.deadline > 0 && Date.now() >= this.deadline; }
+  get exhausted(): boolean { return this.halted || this.used >= this.max || this.timedOut; }
   get remaining(): number { return Math.max(0, this.max - this.used); }
   /** Returns false when the budget is already spent (the caller must stop). */
   consume(n = 1): boolean { if (this.exhausted) return false; this.used += n; return true; }
@@ -285,6 +294,16 @@ export interface FunctionalContext {
   budget: ActionBudget;
   /** Link targets already tested during this run (site-wide nav links are only followed once). */
   testedLinks?: Set<string>;
+  /**
+   * Layout defects already reported for this page, by identity (rule, element, measurement), with the UI states in which
+   * each was seen again. The same defect is one finding however many states it is visible in.
+   */
+  auditSeen?: Map<string, string[]>;
+  /**
+   * A destination reached through a control that only appears after an interaction (a menu item). The run schedules it
+   * for testing as a page of its own when it is not known yet. Returns false when it was not accepted (limit reached).
+   */
+  onDiscoveredPage?: (page: { url: string; label: string; title: string; model: unknown }) => boolean;
   /** "This page only": the application's global navigation is not part of the page under test and is skipped. */
   pageOnly?: boolean;
   /** One controlled creation, explicitly authorized for this exact page (config `workflows`). Runs after the generic tests. */

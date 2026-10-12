@@ -6,8 +6,8 @@ import { analyzeFindings, buildDigest } from '../ai/index.js';
 import { ReactAgent } from '../agent/index.js';
 import { BrowserController, buildReadiness, loadProfile, type BrowserControllerOptions } from '../browser/index.js';
 import type { QADatabase } from '../database/db.js';
-import type { RunRecord, RunState, RunStatus } from '../database/types.js';
-import { crawl, isHashRoute } from '../discovery/crawler.js';
+import type { PageRecord, RunRecord, RunState, RunStatus } from '../database/types.js';
+import { crawl, isHashRoute, samePage } from '../discovery/crawler.js';
 import { buildPageModel } from '../discovery/pageModel.js';
 import { shellSelectors, withoutShell } from '../discovery/shell.js';
 import type { PageModel } from '../discovery/types.js';
@@ -25,7 +25,7 @@ import {
   type InferredIntent,
   type VerificationVerdict,
 } from '../functional/index.js';
-import { auditStateWithScrolling } from '../functional/audit.js';
+import { auditStateWithScrolling, defectKey } from '../functional/audit.js';
 import { fingerprint } from '../rules/helpers.js';
 import { runCounts } from '../reporting/data.js';
 import { generateReports } from '../reporting/index.js';
@@ -88,6 +88,8 @@ export class RunExecutor {
   private verifiedControls = new Set<string>();
   /** The requested page as loaded and verified at the start of the run (used by single-page scope). */
   private landing?: { model: PageModel; status?: number };
+  /** When page testing has to be over so that analysis and the report still fit inside timeouts.runMs. */
+  private testDeadline = 0;
 
   constructor(private readonly deps: ExecutorDeps, private readonly runId: string, private readonly hooks: ExecutorHooks) { this.db = deps.db; }
 
@@ -171,6 +173,8 @@ export class RunExecutor {
     this.budget.used = this.state.actionsUsed;
     this.snap.actionsUsed = this.budget.used;
     this.registry = await buildRegistry(this.config);
+    const runMs = this.config.timeouts.runMs;
+    this.testDeadline = Date.now() + runMs - Math.min(120_000, Math.round(runMs * 0.1));
 
     let outcome: 'completed' | 'aborted' | 'error' = 'completed';
     let reason = '';
@@ -206,6 +210,10 @@ export class RunExecutor {
       }
     } catch { /* trace is best effort */ } finally {
       await this.controller?.close();
+    }
+    if (outcome !== 'completed') {
+      const why = outcome === 'aborted' ? (reason === 'timeout' ? `the run time limit (timeouts.runMs=${this.config.timeouts.runMs}ms) was reached` : `the run was stopped (${reason})`) : `the run failed (${reason.slice(0, 160)})`;
+      this.db.markPendingNotTested(this.runId, `not tested: ${why}`);
     }
     if (outcome === 'error') {
       this.db.setStatus(this.runId, 'ERROR', { error: reason });
@@ -377,6 +385,13 @@ export class RunExecutor {
         },
       });
       this.check();
+      const left = this.state.crawl?.queue ?? [];
+      if (left.length > 0) {
+        const reason = `not visited: the page limit (maxPages=${this.config.maxPages}) was reached`;
+        for (const q of left) this.db.upsertPage(this.runId, { url: q.url, depth: q.depth, error: reason, testStatus: 'not_tested' });
+        this.hooks.emit('warning', `${left.length} more page(s) were found but NOT VISITED: the page limit (maxPages=${this.config.maxPages}) was reached. They are listed as not tested.`);
+        this.action('crawler', 'page-limit', `${left.length} page(s) not visited`, false, reason);
+      }
       this.state.crawlDone = true; this.save();
     }
     this.snap.pagesDiscovered = this.db.listPages(this.runId).length;
@@ -387,30 +402,75 @@ export class RunExecutor {
     const c = this.controller!;
     this.check();
     this.setStatus('TESTING');
-    const pages = this.db.listPages(this.runId).filter((p) => p.model && (p.statusCode ?? 200) < 400);
     const viewports = this.config.viewports;
-    this.snap.unitsTotal = pages.length * viewports.length;
-    this.snap.unitsDone = this.state.testedUnits.length;
     const visual = new VisualTester(this.deps.baselines, this.config.visualThresholds);
+    // The list is read again before every page: a page reached through a menu during testing is scheduled like any other.
+    const waiting = (): PageRecord[] => this.db.listPages(this.runId).filter((p) => p.model && (p.statusCode ?? 200) < 400 && p.testStatus !== 'tested'
+      && viewports.some((vp) => !this.state.testedUnits.includes(`${p.url}|${vp.name}`)));
+    this.snap.unitsDone = this.state.testedUnits.length;
 
-    for (const page of pages) {
+    for (let todo = waiting(); todo.length > 0; todo = waiting()) {
+      const page = todo[0]!;
+      this.snap.unitsTotal = this.state.testedUnits.length + todo.length * viewports.length;
+      // Fair share: the time that is left, divided by the pages still to test, but never less than the configured floor.
+      // A page that needs less gives the rest to the pages after it. When nothing is left, the rest is recorded, not dropped.
+      const left = this.testDeadline - Date.now();
+      if (left <= 0) {
+        const n = this.db.markPendingNotTested(this.runId, `not tested: the run time limit (timeouts.runMs=${this.config.timeouts.runMs}ms) was reached before this page`);
+        this.hooks.emit('warning', `${n} page(s) NOT TESTED: the run time limit (timeouts.runMs) was reached. Raise it, or lower maxPages, to cover them.`);
+        this.action('orchestrator', 'time-limit', `${n} page(s) not tested`, false, 'run time limit reached');
+        break;
+      }
+      const share = Math.max(this.config.timeouts.minPageMs, Math.floor(left / todo.length));
+      let cut = false;
       for (const vp of viewports) {
         this.check();
         const unit = `${page.url}|${vp.name}`;
         if (this.state.testedUnits.includes(unit)) continue;
         this.snap.currentPage = page.url; this.snap.currentViewport = vp.name;
         this.hooks.emit('page', `testing ${page.url} @ ${vp.name}`);
+        this.budget.setDeadline(Date.now() + share);
         try { await this.testUnit(c, this.request.scope === 'page' ? this.request.url : page.url, vp, vp === viewports[0], visual); } catch (e) {
           if (e instanceof StopRun) throw e;
           this.check(); // stopped mid-unit: leave it untested so a resume repeats it
           this.hooks.emit('warning', `Unit ${unit} failed: ${errMsg(e)}`);
           this.action('orchestrator', 'unit-error', unit, false, errMsg(e), page.url, vp.name);
+        } finally {
+          if (this.budget.timedOut && !this.hooks.signal.aborted) {
+            cut = true;
+            this.hooks.emit('warning', `${page.url}: this page used its share of the run time (${Math.round(share / 1000)}s); controls not reached are counted as not tested and the run continues with the next page.`);
+            this.action('orchestrator', 'page-time-share', page.url, false, `time share of ${Math.round(share / 1000)}s used up`, page.url, vp.name);
+          }
+          this.budget.clearDeadline();
         }
         this.state.testedUnits.push(unit); this.snap.unitsDone++; this.save();
       }
       this.db.setPageTested(this.runId, page.url, 'tested');
+      if (cut) this.db.setPagePartial(this.runId, page.url, `this page used its share of the run time (${Math.round(share / 1000)}s) before all of its controls were reached`);
       this.snap.counts = runCounts(this.db, this.runId);
     }
+  }
+
+  /**
+   * A destination reached through a control that only appears after an interaction (a menu item). It becomes a page of
+   * this run when it is new, in scope and within the page limit; the test loop then picks it up like a crawled page.
+   */
+  private discovered(found: { url: string; label: string; title: string; model: unknown }, from: string): boolean {
+    if (this.request.scope === 'page') return false;
+    const pages = this.db.listPages(this.runId);
+    const known = pages.find((p) => samePage(p.url, found.url));
+    if (known && (known.model || known.testStatus !== 'not_tested')) return true; // already a page of this run
+    // the page limit holds for pages found this way too: beyond it the route is recorded, not tested
+    if (pages.filter((p) => p.model || p.testStatus === 'skipped').length >= this.config.maxPages) {
+      if (!known) this.db.upsertPage(this.runId, { url: found.url, depth: 1, title: found.title, error: `not visited: the page limit (maxPages=${this.config.maxPages}) was reached`, testStatus: 'not_tested' });
+      return false;
+    }
+    if (!this.guard.check({ kind: 'navigate', url: found.url, text: found.label }).allowed) return false;
+    this.db.upsertPage(this.runId, { url: known?.url ?? found.url, depth: 1, statusCode: 200, title: found.title, model: found.model, testStatus: 'pending' });
+    this.snap.pagesDiscovered = pages.length + (known ? 0 : 1);
+    this.hooks.emit('page', `discovered ${found.url} through "${found.label}" on ${from}`, { depth: 1 });
+    this.action('crawler', 'visit', found.url, true, `reached through the menu item "${found.label}"`, found.url);
+    return true;
   }
 
   private async testUnit(c: BrowserController, url: string, vp: Viewport, isFirst: boolean, visual: VisualTester): Promise<void> {
@@ -504,8 +564,11 @@ export class RunExecutor {
       const plan = cfg.dynamic?.enabled ? this.planFor(url, vp.name, tested) : undefined;
       const needCapture: { id: string; finding: Finding }[] = [];
       this.snap.currentAction = 'testing elements';
+      // what the page checks above already reported is not reported again for every UI state it is still visible in
+      const auditSeen = new Map<string, string[]>(res.findings.filter((f) => f.classification === 'defect').map((f) => [defectKey(f), []]));
       const functional = await runFunctionalTests({
         controller: c, guard: this.guard, pageUrl: url, model: tested, config: cfg, budget: this.budget, testedLinks: this.testedLinks, plan, pageOnly: this.request.scope === 'page', workflow: this.workflowFor(url), registry: this.registry,
+        auditSeen, onDiscoveredPage: (found) => this.discovered(found, url),
         onResult: (r) => this.recordResult(url, vp, r, needCapture),
         onAction: (a) => {
           // The box is only meaningful on the screenshot taken with it. When the event carries its screenshot, the frame
@@ -535,6 +598,12 @@ export class RunExecutor {
         if (crop) { this.db.addEvidence(crop); this.db.addFindingEvidence(n.id, [crop.id]); }
       }
       if (plan) this.reportUnrun(url, plan, functional);
+      // one finding per defect; the other UI states it was seen in are its occurrences
+      for (const [fp, states] of auditSeen) {
+        if (states.length === 0) continue;
+        const [rule, selector] = fp.split('|');
+        this.action('functional', 'defect-seen-again', `${rule} ${selector ?? ''}`.trim().slice(0, 120), true, `the same defect was also present in ${states.length} other UI state(s): ${[...new Set(states)].slice(0, 12).join('; ')}`.slice(0, 600), url, vp.name);
+      }
     }
     for (const g of this.guard.log.splice(0)) if (!g.decision.allowed) this.action('guard', 'blocked', `${g.action.kind} ${g.action.text ?? g.action.name ?? g.action.url ?? g.action.selector ?? ''}`.trim(), false, g.decision.reason, url, vp.name);
     this.db.addNetworkEvents(this.runId, url, vp.name, c.events.network.slice(n0));
@@ -611,18 +680,19 @@ export class RunExecutor {
 
   /** A selected test that never ran because the action budget ran out must not look as if it ran: it is moved to `skipped` with that reason. */
   private reportUnrun(url: string, plan: TestPlan, results: FunctionalResult[]): void {
-    if (!this.budget.exhausted) return;
+    if (!this.budget.exhausted || this.hooks.signal.aborted) return;
     const ran = new Set(results.map((r) => r.scenario?.id));
     const interactive = new Set([plan.links, ...plan.buttons.map((b) => b.scenario), ...plan.forms.map((f) => f.scenario), ...plan.searches.map((x) => x.scenario), ...plan.modals.map((m) => m.scenario), ...plan.fields.map((f) => f.scenario)].filter((x) => !!x).map((x) => x!.id));
     const unrun = plan.selected.filter((x) => interactive.has(x.id) && !ran.has(x.id));
     if (unrun.length === 0) return;
-    const reason = `not run: the action budget (maxActions=${this.budget.max}) was used up`;
+    const byTime = this.budget.timedOut && this.budget.used < this.budget.max;
+    const reason = byTime ? "not run: this page's share of the run time was used up" : `not run: the action budget (maxActions=${this.budget.max}) was used up`;
     const profile = this.db.listPages(this.runId).find((p) => p.url === url)?.decision;
     this.db.setPageDecision(this.runId, url, {
       types: profile?.types ?? [], planned: profile?.planned, selected: plan.selected.filter((x) => !unrun.includes(x)),
       skipped: [...plan.skipped, ...[...new Map(unrun.map((x) => [x.id, x])).values()].map((x) => ({ id: x.id, label: x.label, reason }))],
     });
-    this.hooks.emit('warning', `${url}: ${[...new Set(unrun.map((x) => x.label))].join(', ')} ${reason}. Raise maxActions to cover every page.`);
+    this.hooks.emit('warning', `${url}: ${[...new Set(unrun.map((x) => x.label))].join(', ')} ${reason}. ${byTime ? 'Raise timeouts.runMs or lower maxPages' : 'Raise maxActions'} to cover every page.`);
   }
 
   /** BEFORE -> ACTION -> AFTER for one functional result. */

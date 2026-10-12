@@ -30,7 +30,13 @@ export const ConfigSchema = z.object({
     navigationMs: z.number().int().positive().default(30000),
     actionMs: z.number().int().positive().default(8000),
     runMs: z.number().int().positive().default(3600000),
-  }).default({ navigationMs: 30000, actionMs: 8000, runMs: 3600000 }),
+    /**
+     * The least time one page gets for its interaction tests. The run time that is left is shared equally between the
+     * pages still to test; a page never gets less than this, so with many pages the last ones are recorded as not tested
+     * instead of every page being cut to nothing.
+     */
+    minPageMs: z.number().int().positive().default(60000),
+  }).default({ navigationMs: 30000, actionMs: 8000, runMs: 3600000, minPageMs: 60000 }),
   viewports: z.array(ViewportSchema).min(1).default([
     { name: 'desktop', width: 1440, height: 900 },
     { name: 'tablet', width: 768, height: 1024 },

@@ -1,6 +1,6 @@
 import { shellAmong } from '../discovery/shell.js';
-import { normalizeUrl, sameOrigin } from '../discovery/crawler.js';
-import { resetPage } from './helpers.js';
+import { normalizeUrl, sameOrigin, samePage } from '../discovery/crawler.js';
+import { resetPage, viewSignature } from './helpers.js';
 import { notInteractable, prepareInteraction } from './interact.js';
 import type { FunctionalContext, FunctionalResult } from './types.js';
 
@@ -63,6 +63,7 @@ export async function testLinks(ctx: FunctionalContext): Promise<FunctionalResul
 
     if (!ctx.budget.consume()) break;
     const n0 = c.events.network.length;
+    const viewBefore = await viewSignature(c);
     let status: number | undefined;
     let lastBuf: Buffer | undefined;
     let usedClick = l.target !== '_blank';
@@ -94,7 +95,23 @@ export async function testLinks(ctx: FunctionalContext): Promise<FunctionalResul
       push({ ...BASE, check: 'soft-error-page', status: 'anomaly', severity: 'minor', basis: null, element: el, expected: 'Link leads to a content page', actual: `Link "${label}" leads to what looks like an error page ("${heading.slice(0, 60)}") although HTTP status was ${status ?? 'unknown'}`, screenshot: lastBuf });
       continue;
     }
-    push({ ...BASE, check: 'navigation', status: 'pass', severity: 'info', basis: null, element: el, expected: 'Link works', actual: `Link "${label}" -> ${finalUrl} (HTTP ${status ?? 'n/a'})` });
+    if (status === undefined) {
+      // No document was requested: the link is a route inside the application, so there is no HTTP status to go by. It
+      // works only if the browser is at the destination AND another view is shown. Anything less is not a verified pass.
+      const reached = samePage(c.page.url(), target);
+      const changed = (await viewSignature(c)) !== viewBefore;
+      if (!reached || !changed) {
+        push({
+          ...BASE, check: 'navigation', status: 'inconclusive', severity: 'info', basis: null, element: el, confidence: 'LOW', expected: `Link "${label}" opens ${target}`,
+          actual: `Link "${label}" -> ${target} could not be verified: ${reached ? 'the address changed, but the view shown did not' : `the browser is at ${finalUrl}, not at the destination${changed ? ' (the content did change)' : ''}`}`,
+          screenshot: lastBuf,
+        });
+        continue;
+      }
+      push({ ...BASE, check: 'navigation', status: 'pass', severity: 'info', basis: null, element: el, confidence: 'HIGH', expected: 'Link works', actual: `Link "${label}" -> ${finalUrl}: the destination view was shown${heading ? ` ("${heading.slice(0, 60)}")` : ''}` });
+      continue;
+    }
+    push({ ...BASE, check: 'navigation', status: 'pass', severity: 'info', basis: null, element: el, expected: 'Link works', actual: `Link "${label}" -> ${finalUrl} (HTTP ${status})` });
   }
   return results;
 }

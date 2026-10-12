@@ -62,6 +62,11 @@ async function main(): Promise<number> {
     const interrupted = platform.orchestrator.interruptedRuns();
     if (interrupted.length) {
       console.log(`${interrupted.length} interrupted run(s): ${interrupted.map((r) => r.id).join(', ')}`);
+      if (process.env.QA_AUTO_RESUME !== '1') {
+        // nothing is executing them any more: close them so they do not stay "TESTING" for ever (they remain resumable)
+        platform.orchestrator.closeInterrupted();
+        console.log('Closed as ABORTED with a report of what they had finished; resume one from the dashboard to continue it.');
+      }
       if (process.env.QA_AUTO_RESUME === '1') { try { platform.orchestrator.resume(interrupted[0]!.id); console.log(`Resumed ${interrupted[0]!.id}`); } catch (e) { console.log(`Could not resume: ${(e as Error).message}`); } }
     }
     const stop = async (): Promise<void> => { console.log('Shutting down...'); await platform.orchestrator.shutdown(); process.exit(0); };

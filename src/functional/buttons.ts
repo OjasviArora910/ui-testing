@@ -1,5 +1,5 @@
 import { inspectDialog, resolveUnexpectedDialog } from './sensitive.js';
-import { elementOf, resetPage, targetFor } from './helpers.js';
+import { elementOf, resetPage, sameViewUrl, targetFor } from './helpers.js';
 import { classifyElementIntent, toClassifiable } from './intent.js';
 import { clickAndObserve, notInteractable, prepareInteraction } from './interact.js';
 import { capturePreActionSnapshot, traceOf } from './observer.js';
@@ -310,11 +310,25 @@ export async function testButtons(ctx: FunctionalContext): Promise<FunctionalRes
 
     // 8. What the click revealed (a dialog, a panel, an editor): its safe, reversible controls are tested in place and
     // each is put back as it was. No button or link in there is clicked, so nothing is saved or confirmed.
-    if (ctx.plan && res.ok && outcome.verdict !== 'BLOCKED' && outcome.verdict !== 'FAIL' && c.page.url() === pre.rawUrl) {
+    if (ctx.plan && res.ok && outcome.verdict !== 'BLOCKED' && outcome.verdict !== 'FAIL' && sameViewUrl(c.page.url(), pre.rawUrl)) {
       // The revealed UI is a state: its reversible controls are tested and restored, and its tabs, expandable sections and
       // menus are followed to the states they lead to (bounded, de-duplicated), each restored afterwards.
       const run = newExploration();
-      await exploreState(ctx, push, run, [label]).catch(() => false);
+      // after a menu item was followed and left again, the menu is opened again for the next item
+      run.reopen = async () => {
+        const open = await c.page.evaluate("Array.from(document.querySelectorAll('[data-qa-menu-opt],[data-qa-opt]')).some((e) => e.getClientRects().length > 0)").catch(() => false);
+        if (!open) { await c.click({ css: b.selector }).catch(() => undefined); await c.settle(200); }
+      };
+      const intact = await exploreState(ctx, push, run, [label]).catch(() => false);
+      // The control only emptied the fragment (<a href="#">): put the address back without telling the application's router.
+      // Not after menu items were followed: the view on screen may then be another one, and the address must not claim
+      // otherwise (the page is reloaded before anything else is tested on it).
+      if (run.followed === 0 && c.page.url() !== pre.rawUrl && sameViewUrl(c.page.url(), pre.rawUrl)) {
+        await c.page.evaluate(`history.replaceState(history.state, '', ${JSON.stringify(pre.rawUrl)})`).catch(() => undefined);
+      }
+      // After menu items were followed the browser came back, but an application does not always redraw the view it left:
+      // the next control is tested on a freshly loaded page.
+      if (!intact || run.followed > 0 || !sameViewUrl(c.page.url(), pre.rawUrl)) needsReset = true;
       if (run.visited.size > 0) {
         ctx.onAction?.({ type: 'explored', target: label, ok: true, detail: `${run.visited.size} state(s): ${run.states.join(' | ').slice(0, 600)}` });
       }
@@ -333,7 +347,7 @@ export async function testButtons(ctx: FunctionalContext): Promise<FunctionalRes
           needsReset = true;
         }
       }
-    } else if (c.page.url() !== pre.rawUrl) {
+    } else if (!sameViewUrl(c.page.url(), pre.rawUrl)) {
       const back = await c.page.goBack().catch(() => null);
       await c.settle(200);
       if (c.page.url() !== pre.rawUrl) {

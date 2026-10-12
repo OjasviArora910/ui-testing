@@ -130,11 +130,27 @@ export class Orchestrator {
   stopInterrupted(runId: string, reason = 'stopped by user'): boolean {
     const run = this.db.getRun(runId);
     if (!run || this.active.has(runId) || ['COMPLETED', 'ABORTED', 'ERROR'].includes(run.status)) return false;
+    this.db.markPendingNotTested(runId, `not tested: ${reason} (the run was no longer executing)`);
     this.db.setStatus(runId, 'ABORTED', { abortReason: `${reason} (the run was no longer executing)` });
     try { generateReports(this.db, this.opts.evidence, runId, this.opts.reportsDir); } catch { /* best effort */ }
     this.emit(runId, 'warning', `Run stopped: ${reason}`);
     this.emit(runId, 'done', 'Run stopped', { incomplete: true });
     return true;
+  }
+
+  /**
+   * Runs that were executing when the server process ended can make no progress by themselves. Each is closed as ABORTED,
+   * its untested pages are recorded as such, and a report is written from what it had stored. They can still be resumed.
+   */
+  closeInterrupted(reason = 'interrupted: the server process ended while the run was executing'): string[] {
+    const closed: string[] = [];
+    for (const run of this.interruptedRuns()) {
+      this.db.markPendingNotTested(run.id, `not tested: ${reason}`);
+      this.db.setStatus(run.id, 'ABORTED', { abortReason: reason });
+      try { generateReports(this.db, this.opts.evidence, run.id, this.opts.reportsDir); } catch { /* best effort */ }
+      closed.push(run.id);
+    }
+    return closed;
   }
 
   isActive(runId: string): boolean { return this.active.has(runId); }
