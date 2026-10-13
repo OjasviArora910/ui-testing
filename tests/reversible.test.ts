@@ -107,7 +107,8 @@ document.getElementById('del').onclick = () => post('/api/DeleteRole');
     expect(results.filter((r) => /Lock Out/.test(r.target ?? '')).every((r) => r.classification === 'BLOCKED_BY_SAFETY'), say).toBe(true);
     expect(hits['POST /api/SaveRole']).toBeUndefined();
     expect(hits['POST /api/DeleteRole']).toBeUndefined();
-    expect(results.some((r) => r.target === 'Save' || r.target === 'Delete role'), say).toBe(false);
+    // they may be named in the record, but only ever as blocked: never as something that was operated
+    expect(results.filter((r) => r.target === 'Save' || r.target === 'Delete role').every((r) => r.classification === 'BLOCKED_BY_SAFETY'), say).toBe(true);
 
     // ---- a control that really does not work is a confirmed bug, with evidence; nothing else is
     const bugs = db.listFindings(runId).filter((f) => f.resultClass === 'BUG');
